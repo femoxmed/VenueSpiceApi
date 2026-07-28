@@ -1,0 +1,32 @@
+[
+  {
+    "fullName": "Super Admin",
+    "email": "femoxmed@gmail.com",
+    "password": "password123",
+    "role": "super_admin"
+  },
+  {
+    "fullName": "Admin User",
+    "email": "admin@example.com",
+    "password": "password123",
+    "role": "admin"
+  },
+  {
+    "fullName": "Aquzera Editorial",
+    "email": "writer@example.com",
+    "password": "password123",
+    "role": "writer"
+  },
+  {
+    "fullName": "Field Technician",
+    "email": "technician@example.com",
+    "password": "password123",
+    "role": "technician"
+  },
+  {
+    "fullName": "Default User",
+    "email": "user@example.com",
+    "password": "password123",
+    "role": "user"
+  }
+]
