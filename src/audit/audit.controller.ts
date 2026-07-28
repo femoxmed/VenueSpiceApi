@@ -10,7 +10,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 @ApiBearerAuth()
 @Controller('audit')
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.SUPER_ADMIN, Role.ADMIN)
+@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
 export class AuditController {
 	constructor(private readonly auditService: AuditService) {}
 

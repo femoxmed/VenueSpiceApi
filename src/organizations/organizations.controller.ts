@@ -29,8 +29,11 @@ export class OrganizationsController {
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
 	@Post()
-	create(@Body() dto: CreateOrganizationDto) {
-		return this.organizationsService.create(dto);
+	create(
+		@Body() dto: CreateOrganizationDto,
+		@Req() req: { user: { id: string; email?: string; role?: Role } },
+	) {
+		return this.organizationsService.create(dto, req.user, req as any);
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
@@ -69,6 +72,6 @@ export class OrganizationsController {
 		@Body() dto: Partial<CreateOrganizationDto>,
 		@Req() req: { user: { id: string; role?: Role } },
 	) {
-		return this.organizationsService.update(id, dto, req.user);
+		return this.organizationsService.update(id, dto, req.user, req as any);
 	}
 }

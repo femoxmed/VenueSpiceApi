@@ -25,6 +25,8 @@ import { VerifyAdminOtpDto } from './dto/verify-admin-otp.dto';
 import { Role } from '../common/enums/role.enum';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CartService } from '../cart/cart.service';
+import { AuditService } from '../audit/audit.service';
+import { Request } from 'express';
 
 @Injectable()
 export class AuthService {
@@ -39,6 +41,7 @@ export class AuthService {
 		private readonly configService: ConfigService,
 		private readonly notificationsService: NotificationsService,
 		private readonly cartService: CartService,
+		private readonly auditService: AuditService,
 	) {}
 
 	async login(payload: LoginDto) {
@@ -183,12 +186,14 @@ export class AuthService {
 		return this.toSafeUser(user);
 	}
 
-	async updateUser(userId: string, dto: Partial<CreateUserDto>) {
+	async updateUser(userId: string, dto: Partial<CreateUserDto>, actor?: { id: string; email?: string; role?: Role }, request?: Request) {
 		const user = await this.usersRepository.findOne({ where: { id: userId } });
 
 		if (!user) {
 			throw new NotFoundException('User not found');
 		}
+
+		const before = this.pickUserAuditFields(user);
 
 		if (dto.fullName) {
 			user.fullName = dto.fullName;
@@ -210,7 +215,17 @@ export class AuthService {
 			user.passwordHash = await bcrypt.hash(dto.password, 10);
 		}
 
-		return this.toSafeUser(await this.usersRepository.save(user));
+		const saved = await this.usersRepository.save(user);
+		await this.auditService.log(
+			'user.updated',
+			actor,
+			'user',
+			saved.id,
+			this.buildChanges(before, this.pickUserAuditFields(saved)),
+			{ updatedFields: Object.keys(dto).filter((key) => key !== 'password') },
+			request,
+		);
+		return this.toSafeUser(saved);
 	}
 
 	async updateMe(userId: string, dto: { fullName?: string; phone?: string }) {
@@ -360,7 +375,7 @@ export class AuthService {
 		};
 	}
 
-	async createUser(dto: CreateUserDto) {
+	async createUser(dto: CreateUserDto, actor?: { id: string; email?: string; role?: Role }, request?: Request) {
 		const email = dto.email.toLowerCase().trim();
 		const existing = await this.usersRepository.findOne({ where: { email } });
 
@@ -390,6 +405,16 @@ export class AuthService {
 			),
 		);
 
+		await this.auditService.log(
+			'user.created',
+			actor,
+			'user',
+			user.id,
+			{ after: this.pickUserAuditFields(user) },
+			undefined,
+			request,
+		);
+
 		return this.toSafeUser(user);
 	}
 
@@ -407,15 +432,16 @@ export class AuthService {
 			.then((users) => users.map((user) => this.toSafeUser(user)));
 	}
 
-	async updateUserStatus(userId: string, isActive: boolean) {
+	async updateUserStatus(userId: string, isActive: boolean, actor?: { id: string; email?: string; role?: Role }, request?: Request) {
 		const user = await this.usersRepository.findOne({ where: { id: userId } });
 
 		if (!user) {
 			throw new NotFoundException('User not found');
 		}
 
+		const before = this.pickUserAuditFields(user);
 		user.isActive = isActive;
-		await this.usersRepository.save(user);
+		const saved = await this.usersRepository.save(user);
 
 		await this.notificationsService.queueEmail(
 			user.email,
@@ -423,7 +449,36 @@ export class AuthService {
 			this.buildStatusChangedEmail(user.fullName, isActive),
 		);
 
-		return this.toSafeUser(user);
+		await this.auditService.log(
+			isActive ? 'user.activated' : 'user.deactivated',
+			actor,
+			'user',
+			saved.id,
+			this.buildChanges(before, this.pickUserAuditFields(saved)),
+			undefined,
+			request,
+		);
+
+		return this.toSafeUser(saved);
+	}
+
+	private pickUserAuditFields(user: UserEntity) {
+		return {
+			fullName: user.fullName,
+			email: user.email,
+			role: user.role,
+			isActive: user.isActive,
+		};
+	}
+
+	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {
+		const changes: Record<string, { before: unknown; after: unknown }> = {};
+		Object.keys(after).forEach((key) => {
+			if (before[key] !== after[key]) {
+				changes[key] = { before: before[key], after: after[key] };
+			}
+		});
+		return changes;
 	}
 
 	async forgotPassword(dto: ForgotPasswordDto) {

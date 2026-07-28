@@ -4,9 +4,10 @@ import { OrganizationEntity } from '../organizations/entities/organization.entit
 import { VendorCatalogueItemEntity } from './entities/vendor-catalogue-item.entity';
 import { VendorCatalogueController } from './vendor-catalogue.controller';
 import { VendorCatalogueService } from './vendor-catalogue.service';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
-	imports: [TypeOrmModule.forFeature([VendorCatalogueItemEntity, OrganizationEntity])],
+	imports: [TypeOrmModule.forFeature([VendorCatalogueItemEntity, OrganizationEntity]), AuditModule],
 	controllers: [VendorCatalogueController],
 	providers: [VendorCatalogueService],
 	exports: [VendorCatalogueService],

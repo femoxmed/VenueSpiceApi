@@ -3,7 +3,12 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AuditLogEntity } from './entities/audit-log.entity';
 import { Request } from 'express';
-import { UserEntity } from '../auth/entities/user.entity';
+
+type AuditActor = {
+	id?: string;
+	email?: string;
+	role?: string;
+};
 
 @Injectable()
 export class AuditService {
@@ -14,7 +19,7 @@ export class AuditService {
 
 	async log(
 		action: string,
-		user?: UserEntity,
+		user?: AuditActor,
 		entityType?: string,
 		entityId?: string,
 		changes?: Record<string, unknown>,

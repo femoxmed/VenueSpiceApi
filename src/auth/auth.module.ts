@@ -11,6 +11,7 @@ import { UserEntity } from './entities/user.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { CartModule } from '../cart/cart.module';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { OrganizationEntity } from '../organizations/entities/organization.entit
     PassportModule,
     NotificationsModule,
     CartModule,
+    AuditModule,
     TypeOrmModule.forFeature([UserEntity, PasswordResetRecordEntity, OrganizationEntity]),
     JwtModule.registerAsync({
       imports: [ConfigModule],

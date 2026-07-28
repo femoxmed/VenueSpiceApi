@@ -4,6 +4,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { OrganizationEntity } from './entities/organization.entity';
+import { AuditService } from '../audit/audit.service';
+import { Request } from 'express';
 
 type MockStripeOnboardingDto = {
 	businessType?: string;
@@ -33,6 +35,7 @@ export class OrganizationsService {
 		@InjectRepository(OrganizationEntity)
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
 		private readonly configService: ConfigService,
+		private readonly auditService: AuditService,
 	) {}
 
 	findAll() {
@@ -124,23 +127,34 @@ export class OrganizationsService {
 		return organization;
 	}
 
-	async create(dto: CreateOrganizationDto) {
+	async create(dto: CreateOrganizationDto, user?: { id: string; email?: string; role?: string }, request?: Request) {
 		const slug = dto.slug || this.slugify(dto.name);
 		const existing = await this.organizationsRepository.findOne({
 			where: { slug },
 		});
 		if (existing) throw new BadRequestException('Organization slug already exists');
 
-		return this.organizationsRepository.save(
+		const organization = await this.organizationsRepository.save(
 			this.organizationsRepository.create({ ...dto, slug }),
 		);
+		await this.auditService.log(
+			'organization.created',
+			user,
+			'organization',
+			organization.id,
+			{ after: this.pickOrganizationAuditFields(organization) },
+			undefined,
+			request,
+		);
+		return organization;
 	}
 
-	async update(id: string, dto: Partial<CreateOrganizationDto>, user?: { id: string; role?: string }) {
+	async update(id: string, dto: Partial<CreateOrganizationDto>, user?: { id: string; email?: string; role?: string }, request?: Request) {
 		const organization = await this.findOne(id);
 		if (user) {
 			this.ensureOwnerOrAdmin(organization, user);
 		}
+		const before = this.pickOrganizationAuditFields(organization);
 		if (dto.slug && dto.slug !== organization.slug) {
 			const existing = await this.organizationsRepository.findOne({
 				where: { slug: dto.slug },
@@ -156,7 +170,43 @@ export class OrganizationsService {
 		if (organization.type === 'vendor' && this.hasCompletedVendorProfile(organization)) {
 			organization.vendorProfileCompletedAt = organization.vendorProfileCompletedAt ?? new Date();
 		}
-		return this.organizationsRepository.save(organization);
+		const saved = await this.organizationsRepository.save(organization);
+		await this.auditService.log(
+			'organization.updated',
+			user,
+			'organization',
+			saved.id,
+			this.buildChanges(before, this.pickOrganizationAuditFields(saved)),
+			{ updatedFields: Object.keys(dto) },
+			request,
+		);
+		return saved;
+	}
+
+	private pickOrganizationAuditFields(organization: OrganizationEntity) {
+		return {
+			name: organization.name,
+			slug: organization.slug,
+			type: organization.type,
+			status: organization.status,
+			contactEmail: organization.contactEmail,
+			contactPhone: organization.contactPhone,
+			businessCategory: organization.businessCategory,
+			country: organization.country,
+			stateProvince: organization.stateProvince,
+			website: organization.website,
+			vendorProfileCompletedAt: organization.vendorProfileCompletedAt,
+		};
+	}
+
+	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {
+		const changes: Record<string, { before: unknown; after: unknown }> = {};
+		Object.keys(after).forEach((key) => {
+			if (before[key] !== after[key]) {
+				changes[key] = { before: before[key], after: after[key] };
+			}
+		});
+		return changes;
 	}
 
 	async createStripeConnectLink(

@@ -5,6 +5,8 @@ import { Role } from '../common/enums/role.enum';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { CreateVendorCatalogueItemDto } from './dto/create-vendor-catalogue-item.dto';
 import { VendorCatalogueItemEntity } from './entities/vendor-catalogue-item.entity';
+import { AuditService } from '../audit/audit.service';
+import { Request } from 'express';
 
 type DashboardUser = { id: string; role?: Role };
 type NormalizedVendorCatalogueDto = Omit<Partial<CreateVendorCatalogueItemDto>, 'price' | 'priceType' | 'minPrice' | 'maxPrice'> & {
@@ -21,6 +23,7 @@ export class VendorCatalogueService {
 		private readonly catalogueRepository: Repository<VendorCatalogueItemEntity>,
 		@InjectRepository(OrganizationEntity)
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
+		private readonly auditService: AuditService,
 	) {}
 
 	async findMine(user: DashboardUser) {
@@ -44,9 +47,9 @@ export class VendorCatalogueService {
 		});
 	}
 
-	async create(dto: CreateVendorCatalogueItemDto, user: DashboardUser) {
+	async create(dto: CreateVendorCatalogueItemDto, user: DashboardUser, request?: Request) {
 		const organization = await this.findVendorOrganization(user);
-		return this.catalogueRepository.save(
+		const item = await this.catalogueRepository.save(
 			this.catalogueRepository.create({
 				...this.normalizePricing(dto),
 				minimumOrderQuantity: dto.minimumOrderQuantity ?? 1,
@@ -55,10 +58,21 @@ export class VendorCatalogueService {
 				status: 'active',
 			}),
 		);
+		await this.auditService.log(
+			'vendor_catalogue.created',
+			user,
+			'vendor_catalogue_item',
+			item.id,
+			{ after: this.pickCatalogueAuditFields(item) },
+			{ organizationId: organization.id },
+			request,
+		);
+		return item;
 	}
 
-	async update(id: string, dto: Partial<CreateVendorCatalogueItemDto>, user: DashboardUser) {
+	async update(id: string, dto: Partial<CreateVendorCatalogueItemDto>, user: DashboardUser, request?: Request) {
 		const item = await this.findOwnedItem(id, user);
+		const before = this.pickCatalogueAuditFields(item);
 		Object.assign(item, this.normalizePricing({
 			...dto,
 			price: dto.price ?? Number(item.price),
@@ -66,13 +80,58 @@ export class VendorCatalogueService {
 			minPrice: dto.minPrice ?? (item.minPrice == null ? undefined : Number(item.minPrice)),
 			maxPrice: dto.maxPrice ?? (item.maxPrice == null ? undefined : Number(item.maxPrice)),
 		}));
-		return this.catalogueRepository.save(item);
+		const saved = await this.catalogueRepository.save(item);
+		await this.auditService.log(
+			'vendor_catalogue.updated',
+			user,
+			'vendor_catalogue_item',
+			saved.id,
+			this.buildChanges(before, this.pickCatalogueAuditFields(saved)),
+			{ organizationId: saved.organizationId, updatedFields: Object.keys(dto) },
+			request,
+		);
+		return saved;
 	}
 
-	async archive(id: string, user: DashboardUser) {
+	async archive(id: string, user: DashboardUser, request?: Request) {
 		const item = await this.findOwnedItem(id, user);
+		const before = this.pickCatalogueAuditFields(item);
 		item.status = 'archived';
-		return this.catalogueRepository.save(item);
+		const saved = await this.catalogueRepository.save(item);
+		await this.auditService.log(
+			'vendor_catalogue.archived',
+			user,
+			'vendor_catalogue_item',
+			saved.id,
+			this.buildChanges(before, this.pickCatalogueAuditFields(saved)),
+			{ organizationId: saved.organizationId },
+			request,
+		);
+		return saved;
+	}
+
+	private pickCatalogueAuditFields(item: VendorCatalogueItemEntity) {
+		return {
+			name: item.name,
+			imageUrl: item.imageUrl,
+			price: Number(item.price),
+			priceType: item.priceType,
+			minPrice: item.minPrice == null ? null : Number(item.minPrice),
+			maxPrice: item.maxPrice == null ? null : Number(item.maxPrice),
+			unitMeasure: item.unitMeasure,
+			minimumOrderQuantity: item.minimumOrderQuantity,
+			status: item.status,
+		};
+	}
+
+	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {
+		const changes: Record<string, { before: unknown; after: unknown }> = {};
+		Object.keys(after).forEach((key) => {
+			if (before[key] !== after[key]) {
+				changes[key] = { before: before[key], after: after[key] };
+			}
+		});
+		return changes;
 	}
 
 	private async findOwnedItem(id: string, user: DashboardUser) {

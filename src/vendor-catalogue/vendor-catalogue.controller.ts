@@ -40,7 +40,7 @@ export class VendorCatalogueController {
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 	@Post()
 	create(@Body() dto: CreateVendorCatalogueItemDto, @Req() req: { user: { id: string; role: Role } }) {
-		return this.vendorCatalogueService.create(dto, req.user);
+		return this.vendorCatalogueService.create(dto, req.user, req as any);
 	}
 
 	@ApiBearerAuth()
@@ -54,7 +54,7 @@ export class VendorCatalogueController {
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 	@Patch(':id')
 	update(@Param('id') id: string, @Body() dto: Partial<CreateVendorCatalogueItemDto>, @Req() req: { user: { id: string; role: Role } }) {
-		return this.vendorCatalogueService.update(id, dto, req.user);
+		return this.vendorCatalogueService.update(id, dto, req.user, req as any);
 	}
 
 	@ApiBearerAuth()
@@ -67,6 +67,6 @@ export class VendorCatalogueController {
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 	@Delete(':id')
 	archive(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
-		return this.vendorCatalogueService.archive(id, req.user);
+		return this.vendorCatalogueService.archive(id, req.user, req as any);
 	}
 }

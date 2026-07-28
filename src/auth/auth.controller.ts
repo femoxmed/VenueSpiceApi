@@ -99,8 +99,8 @@ export class AuthController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN)
 	@Post('users')
-	createUser(@Body() dto: CreateUserDto) {
-		return this.authService.createUser(dto);
+	createUser(@Body() dto: CreateUserDto, @Req() req: { user: { id: string; email?: string; role: Role } }) {
+		return this.authService.createUser(dto, req.user, req as any);
 	}
 
 	@ApiBearerAuth()
@@ -110,8 +110,9 @@ export class AuthController {
 	updateUserStatus(
 		@Param('userId') userId: string,
 		@Body() dto: UpdateUserStatusDto,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.authService.updateUserStatus(userId, dto.isActive);
+		return this.authService.updateUserStatus(userId, dto.isActive, req.user, req as any);
 	}
 
 	@ApiBearerAuth()
@@ -129,7 +130,8 @@ export class AuthController {
 	updateUser(
 		@Param('userId') userId: string,
 		@Body() dto: Partial<CreateUserDto>,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.authService.updateUser(userId, dto);
+		return this.authService.updateUser(userId, dto, req.user, req as any);
 	}
 }
