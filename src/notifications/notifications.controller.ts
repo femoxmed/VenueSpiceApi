@@ -40,7 +40,7 @@ export class NotificationsController {
 	@Post('email/test')
 	async sendTestEmail(@Body() dto: TestEmailDto) {
 		const email = dto.email;
-		const subject = 'Test Email from EventBox Platform';
+		const subject = 'Test Email from Venue Spice Platform';
 		const html = this.notificationsService.buildBrandedEmail({
 			eyebrow: 'System test',
 			title: 'Email configuration test',

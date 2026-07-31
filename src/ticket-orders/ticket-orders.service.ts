@@ -103,7 +103,7 @@ export class TicketOrdersService {
 		const customerName = orders[0].customerName || 'there';
 		await this.notificationsService.queueEmail(
 			email,
-			'Your EventBox tickets',
+			'Your Venue Spice tickets',
 			this.buildFindMyTicketEmail(customerName, email, orders),
 		);
 
@@ -375,8 +375,14 @@ export class TicketOrdersService {
 	}
 
 	private calculateApplicationFeeAmount(order: TicketOrderEntity) {
-		const percent = Number(this.configService.get<string>('EVENTBOX_FEE_PERCENT', '0.05'));
-		const fixed = Number(this.configService.get<string>('EVENTBOX_FEE_FIXED', '0'));
+		const percent = Number(
+			this.configService.get<string>('VENUE_SPICE_FEE_PERCENT')
+				?? this.configService.get<string>('EVENTBOX_FEE_PERCENT', '0.05'),
+		);
+		const fixed = Number(
+			this.configService.get<string>('VENUE_SPICE_FEE_FIXED')
+				?? this.configService.get<string>('EVENTBOX_FEE_FIXED', '0'),
+		);
 		const total = Number(order.total ?? 0);
 		return Math.max(0, Math.round((total * percent + fixed) * 100));
 	}
@@ -568,7 +574,7 @@ export class TicketOrdersService {
 
 		return this.notificationsService.buildBrandedEmail({
 			eyebrow: 'Find my ticket',
-			title: 'Your EventBox tickets',
+			title: 'Your Venue Spice tickets',
 			greeting: `Hello ${fullName},`,
 			intro:
 				'We found active tickets connected to this email and have included them below.',

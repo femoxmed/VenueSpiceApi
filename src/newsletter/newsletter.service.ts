@@ -25,7 +25,7 @@ export class NewsletterService {
 
 		if (existing?.status === 'active') {
 			return {
-				message: 'You are already subscribed to the EventBox newsletter.',
+				message: 'You are already subscribed to the Venue Spice newsletter.',
 				subscriber: this.serialize(existing),
 			};
 		}
@@ -49,24 +49,24 @@ export class NewsletterService {
 
 		await this.notificationsService.queueEmail(
 			email,
-			'Welcome to the EventBox newsletter',
+			'Welcome to the Venue Spice newsletter',
 			this.notificationsService.buildBrandedEmail({
 				eyebrow: 'Newsletter',
 				title: 'You are in the loop',
 				greeting: 'Hello,',
 				intro:
-					'Thanks for subscribing to EventBox updates. We will send you event inspiration, ticketing updates, and helpful organizer tips.',
+					'Thanks for subscribing to Venue Spice updates. We will send you event inspiration, ticketing updates, and helpful organizer tips.',
 				action: {
 					label: 'Discover events',
 					url: `${appUrl}/discover`,
 				},
 				note: 'You can unsubscribe from future newsletters at any time.',
-				footerHtml: `This email was sent by EventBox. To stop receiving newsletter emails, <a href="${unsubscribeUrl}" style="color:#2960EC;text-decoration:underline;">unsubscribe here</a>.`,
+				footerHtml: `This email was sent by Venue Spice. To stop receiving newsletter emails, <a href="${unsubscribeUrl}" style="color:#2960EC;text-decoration:underline;">unsubscribe here</a>.`,
 			}),
 		);
 
 		return {
-			message: 'Thanks for subscribing to the EventBox newsletter.',
+			message: 'Thanks for subscribing to the Venue Spice newsletter.',
 			subscriber: this.serialize(subscriber),
 		};
 	}
@@ -104,7 +104,7 @@ export class NewsletterService {
 		}
 
 		return {
-			message: 'You have been unsubscribed from the EventBox newsletter.',
+			message: 'You have been unsubscribed from the Venue Spice newsletter.',
 			subscriber: this.serialize(subscriber),
 		};
 	}

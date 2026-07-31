@@ -71,7 +71,7 @@ export class AuthService {
 
 			await this.queueAuthEmail(
 				user.email,
-				'EventBox admin sign-in code',
+				'Venue Spice admin sign-in code',
 				this.buildAdminOtpEmail(user.fullName, code),
 			);
 
@@ -281,7 +281,7 @@ export class AuthService {
 
 		await this.queueAuthEmail(
 			user.email,
-			'Verify your EventBox account',
+			'Verify your Venue Spice account',
 			this.buildVerificationEmail(user.fullName, verificationCode),
 		);
 
@@ -333,7 +333,7 @@ export class AuthService {
 
 		await this.queueAuthEmail(
 			user.email,
-			'Welcome to EventBox',
+			'Welcome to Venue Spice',
 			this.buildWelcomeEmail(user.fullName, user.role),
 		);
 
@@ -366,7 +366,7 @@ export class AuthService {
 
 		await this.queueAuthEmail(
 			user.email,
-			'Verify your EventBox account',
+			'Verify your Venue Spice account',
 			this.buildVerificationEmail(user.fullName, verificationCode),
 		);
 
@@ -396,7 +396,7 @@ export class AuthService {
 
 		await this.notificationsService.queueEmail(
 			user.email,
-			'Your EventBox account has been created',
+			'Your Venue Spice account has been created',
 			this.buildAccountCreatedEmail(
 				user.fullName,
 				user.email,
@@ -445,7 +445,7 @@ export class AuthService {
 
 		await this.notificationsService.queueEmail(
 			user.email,
-			isActive ? 'EventBox account re-activated' : 'EventBox account deactivated',
+			isActive ? 'Venue Spice account re-activated' : 'Venue Spice account deactivated',
 			this.buildStatusChangedEmail(user.fullName, isActive),
 		);
 
@@ -529,7 +529,7 @@ export class AuthService {
 
 		await this.notificationsService.queueEmail(
 			user.email,
-			'Reset your EventBox password',
+			'Reset your Venue Spice password',
 			this.buildPasswordResetEmail(
 				user.fullName,
 				passwordResetUrl,
@@ -601,7 +601,7 @@ export class AuthService {
 
 		await this.notificationsService.queueEmail(
 			user.email,
-			'Your EventBox password has been changed',
+			'Your Venue Spice password has been changed',
 			this.buildPasswordChangedEmail(user.fullName),
 		);
 
@@ -724,10 +724,10 @@ export class AuthService {
 	private buildAdminOtpEmail(fullName: string, code: string) {
 		return this.notificationsService.buildBrandedEmail({
 			eyebrow: 'Admin sign-in',
-			title: 'Your EventBox admin code',
+			title: 'Your Venue Spice admin code',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Use this one-time code to finish signing in to the EventBox admin console.',
+				'Use this one-time code to finish signing in to the Venue Spice admin console.',
 			body: `<div style="margin-top:22px;padding:18px 20px;border:1px solid #C8D6FF;background:#F3F6FF;color:#171B24;font:900 30px Arial Black,Arial,sans-serif;letter-spacing:8px;text-align:center;border-radius:16px;">${code}</div>`,
 			note: 'This code expires in 10 minutes.',
 		});
@@ -736,10 +736,10 @@ export class AuthService {
 	private buildVerificationEmail(fullName: string, code: string) {
 		return this.notificationsService.buildBrandedEmail({
 			eyebrow: 'Email verification',
-			title: 'Verify your EventBox account',
+			title: 'Verify your Venue Spice account',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Use this verification code to finish creating your EventBox account.',
+				'Use this verification code to finish creating your Venue Spice account.',
 			body: `<div style="margin-top:22px;padding:18px 20px;border:1px solid #C8D6FF;background:#F3F6FF;color:#171B24;font:900 30px Arial Black,Arial,sans-serif;letter-spacing:8px;text-align:center;border-radius:16px;">${code}</div>`,
 			note: 'This code expires in 10 minutes.',
 		});
@@ -756,10 +756,10 @@ export class AuthService {
 	private buildWelcomeEmail(fullName: string, role: Role) {
 		return this.notificationsService.buildBrandedEmail({
 			eyebrow: 'Welcome',
-			title: 'Welcome to EventBox',
+			title: 'Welcome to Venue Spice',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Your account has been created successfully. You can now sign in and manage your EventBox experience.',
+				'Your account has been created successfully. You can now sign in and manage your Venue Spice experience.',
 			rows: [{ label: 'Role', value: role }],
 			action: {
 				label: 'Sign in',
@@ -776,10 +776,10 @@ export class AuthService {
 	) {
 		return this.notificationsService.buildBrandedEmail({
 			eyebrow: 'Account created',
-			title: 'Your EventBox account is ready',
+			title: 'Your Venue Spice account is ready',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'An account has been created for you on EventBox. Please sign in and update your password as soon as possible.',
+				'An account has been created for you on Venue Spice. Please sign in and update your password as soon as possible.',
 			rows: [
 				{ label: 'Role', value: role },
 				{ label: 'Email', value: email },
@@ -797,7 +797,7 @@ export class AuthService {
 			eyebrow: 'Account status',
 			title: 'Account status update',
 			greeting: `Hello ${fullName},`,
-			intro: `Your EventBox account has been ${isActive ? 'activated' : 'deactivated'}.`,
+			intro: `Your Venue Spice account has been ${isActive ? 'activated' : 'deactivated'}.`,
 			rows: [{ label: 'Status', value: isActive ? 'Active' : 'Inactive' }],
 		});
 	}
@@ -812,7 +812,7 @@ export class AuthService {
 			title: 'Reset your password',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Use the button below to reset your EventBox password. This link can only be used once.',
+				'Use the button below to reset your Venue Spice password. This link can only be used once.',
 			rows: [{ label: 'Expires in', value: expiresInValue }],
 			action: {
 				label: 'Reset password',
@@ -826,7 +826,7 @@ export class AuthService {
 			eyebrow: 'Security',
 			title: 'Password changed',
 			greeting: `Hello ${fullName},`,
-			intro: 'Your EventBox password has been changed successfully.',
+			intro: 'Your Venue Spice password has been changed successfully.',
 			note: 'If you did not perform this action, contact support immediately.',
 		});
 	}

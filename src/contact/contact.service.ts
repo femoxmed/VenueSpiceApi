@@ -20,11 +20,11 @@ export class ContactService {
 
 		await this.notificationsService.queueEmail(
 			recipient,
-			`New EventBox contact message from ${dto.fullName}`,
+			`New Venue Spice contact message from ${dto.fullName}`,
 			this.notificationsService.buildBrandedEmail({
 				eyebrow: 'Contact form',
 				title: 'New website message',
-				greeting: 'Hello EventBox team,',
+				greeting: 'Hello Venue Spice team,',
 				intro: 'A customer submitted a message from the contact page.',
 				rows: [
 					{ label: 'Full name', value: dto.fullName },
@@ -34,7 +34,7 @@ export class ContactService {
 					{ label: 'Source', value: dto.source || 'Contact page' },
 				],
 				body: `<p>${this.escapeHtml(dto.message).replace(/\n/g, '<br>')}</p>`,
-				footerNote: 'This message was submitted through the EventBox website.',
+				footerNote: 'This message was submitted through the Venue Spice website.',
 			}),
 			{ replyTo: dto.email },
 		);

@@ -360,7 +360,7 @@ export class DiscountsService {
 		}
 
 		// TODO: send an influencer registration email when the mailer/invite flow is finalized.
-		console.log(`[TEMP INFLUENCER INVITE] ${normalizedEmail} invited to register as an EventBox influencer`);
+		console.log(`[TEMP INFLUENCER INVITE] ${normalizedEmail} invited to register as a Venue Spice influencer`);
 
 		return this.agentsRepository.save(
 			this.agentsRepository.create({

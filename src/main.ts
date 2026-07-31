@@ -58,7 +58,7 @@ async function bootstrap() {
 
 	// Swagger
 	const swaggerConfig = new DocumentBuilder()
-		.setTitle('EventBox API')
+		.setTitle('Venue Spice API')
 		.setDescription(
 			'APIs for organizations, events, ticket orders, referrals, Stripe checkout, uploads, queues, and admin operations.',
 		)

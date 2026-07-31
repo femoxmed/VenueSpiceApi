@@ -56,13 +56,13 @@ export class NotificationsService implements OnApplicationBootstrap {
 		try {
 			await this.sendEmailNow(
 				to,
-				'EventBox SMTP startup test',
+				'Venue Spice SMTP startup test',
 				this.buildBrandedEmail({
 					eyebrow: 'SMTP test',
-					title: 'EventBox email is connected',
+					title: 'Venue Spice email is connected',
 					greeting: 'Hello,',
 					intro:
-						'The EventBox API started successfully and sent this message using the configured SMTP transport.',
+						'The Venue Spice API started successfully and sent this message using the configured SMTP transport.',
 					rows: [
 						{ label: 'Environment', value: process.env.NODE_ENV || 'local' },
 						{ label: 'Sent at', value: new Date() },
@@ -278,9 +278,9 @@ export class NotificationsService implements OnApplicationBootstrap {
 						</tr>
 						<tr>
 							<td style="padding:22px 4px 0;color:#68708A;font:400 12px/1.7 Arial,sans-serif;">
-								${options.footerHtml ? this.sanitizeEmailHtml(options.footerHtml) : this.escapeHtml(options.footerNote || 'This email was sent by EventBox.')}
+								${options.footerHtml ? this.sanitizeEmailHtml(options.footerHtml) : this.escapeHtml(options.footerNote || 'This email was sent by Venue Spice.')}
 								<br>
-								Need help? Email <a href="mailto:${this.escapeHtml(supportEmail)}" style="color:#2960EC;text-decoration:underline;">${this.escapeHtml(supportEmail)}</a>${dashboardUrl ? ` or visit your <a href="${this.escapeHtml(dashboardUrl)}" style="color:#2960EC;text-decoration:underline;">EventBox dashboard</a>` : ''}.
+								Need help? Email <a href="mailto:${this.escapeHtml(supportEmail)}" style="color:#2960EC;text-decoration:underline;">${this.escapeHtml(supportEmail)}</a>${dashboardUrl ? ` or visit your <a href="${this.escapeHtml(dashboardUrl)}" style="color:#2960EC;text-decoration:underline;">Venue Spice dashboard</a>` : ''}.
 							</td>
 						</tr>
 					</table>
@@ -294,10 +294,10 @@ export class NotificationsService implements OnApplicationBootstrap {
 	buildCustomerCreatedEmail(fullName: string) {
 		return this.buildBrandedEmail({
 			eyebrow: 'Customer profile',
-			title: 'Welcome to EventBox',
+			title: 'Welcome to Venue Spice',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Your customer profile has been created successfully in EventBox.',
+				'Your customer profile has been created successfully in Venue Spice.',
 			body:
 				'<p>You will now receive order updates, invoices, maintenance reminders, and service notifications by email.</p>',
 			action: {
@@ -318,7 +318,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 	) {
 		return this.buildBrandedEmail({
 			eyebrow: 'Order created',
-			title: 'Your EventBox order is in',
+			title: 'Your Venue Spice order is in',
 			greeting: `Hello ${fullName},`,
 			intro:
 				'Your order has been created successfully. We will keep you updated as it moves forward.',
@@ -345,7 +345,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 	) {
 		return this.buildBrandedEmail({
 			eyebrow: 'Invoice',
-			title: 'Your EventBox invoice is ready',
+			title: 'Your Venue Spice invoice is ready',
 			greeting: `Hello ${fullName},`,
 			intro: 'Your invoice is ready for review.',
 			rows: [
@@ -373,7 +373,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 			title: 'Your service request has been logged',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'Your EventBox service request has been created successfully. Our team will notify you once a technician has been assigned.',
+				'Your Venue Spice service request has been created successfully. Our team will notify you once a technician has been assigned.',
 			rows: [
 				{ label: 'Preferred date', value: preferredDate },
 				{ label: 'Issue', value: issue },
@@ -396,7 +396,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 	) {
 		return this.buildBrandedEmail({
 			eyebrow: 'Technician assignment',
-			title: 'New EventBox field assignment',
+			title: 'New Venue Spice field assignment',
 			greeting: `Hello ${fullName},`,
 			intro:
 				'You have been assigned a new service visit. Please sign in to manage the visit.',
@@ -426,7 +426,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 			title: 'Payment received',
 			greeting: `Hello ${fullName},`,
 			intro:
-				'We have received your payment. Thank you for choosing EventBox.',
+				'We have received your payment. Thank you for choosing Venue Spice.',
 			rows: [
 				{ label: 'Invoice', value: invoiceNumber },
 				{ label: 'Amount', value: this.formatCurrency(total, currency) },
@@ -491,7 +491,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 				),
 			},
 			footerNote:
-				'You can reply directly to this email or from your EventBox dashboard.',
+				'You can reply directly to this email or from your Venue Spice dashboard.',
 		});
 	}
 
