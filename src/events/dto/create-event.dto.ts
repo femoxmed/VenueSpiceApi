@@ -13,6 +13,10 @@ import {
 import { Type } from 'class-transformer';
 
 export class CreateTicketTypeDto {
+	@IsOptional()
+	@IsString()
+	id?: string;
+
 	@IsString()
 	name: string;
 

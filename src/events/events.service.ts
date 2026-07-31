@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { MoreThanOrEqual, Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Role } from '../common/enums/role.enum';
@@ -48,11 +48,20 @@ export class EventsService {
 	}
 
 	findPublic() {
-		return this.eventsRepository.find({
-			where: { status: 'published', startsAt: MoreThanOrEqual(new Date()) },
-			order: { startsAt: 'ASC' },
-			take: 24,
-		});
+		const now = new Date();
+		return this.eventsRepository
+			.createQueryBuilder('event')
+			.where('event.status = :status', { status: 'published' })
+			.andWhere(
+				new Brackets((builder) => {
+					builder
+						.where('event.endsAt IS NOT NULL AND event.endsAt >= :now', { now })
+						.orWhere('event.endsAt IS NULL AND event.startsAt >= :now', { now });
+				}),
+			)
+			.orderBy('event.startsAt', 'ASC')
+			.take(24)
+			.getMany();
 	}
 
 	async findPublicOne(idOrSlug: string) {
@@ -168,13 +177,7 @@ export class EventsService {
 		});
 
 		if (ticketTypes) {
-			await this.ticketTypesRepository.delete({ event: { id: event.id } });
-			event.ticketTypes = ticketTypes.map((ticket) =>
-				this.ticketTypesRepository.create({
-					...ticket,
-					event,
-				}),
-			);
+			event.ticketTypes = await this.reconcileTicketTypes(event, ticketTypes);
 		}
 
 		return this.eventsRepository.save(event);
@@ -182,6 +185,53 @@ export class EventsService {
 
 	updateStatus(id: string, status: EventEntity['status'], user?: { id: string; role: Role }) {
 		return this.update(id, { status }, user);
+	}
+
+	private async reconcileTicketTypes(
+		event: EventEntity,
+		ticketTypes: NonNullable<CreateEventDto['ticketTypes']>,
+	) {
+		const existingTypes = await this.ticketTypesRepository.find({
+			where: { event: { id: event.id } },
+		});
+		const nextTypes: TicketTypeEntity[] = [];
+		const usedExistingIds = new Set<string>();
+
+		for (const ticket of ticketTypes) {
+			const existing = ticket.id
+				? existingTypes.find((item) => item.id === ticket.id)
+				: existingTypes.find((item) => item.name.toLowerCase() === ticket.name.toLowerCase());
+			if (existing) {
+				if (Number(ticket.quantity) < Number(existing.quantitySold || 0)) {
+					throw new BadRequestException(`${existing.name} quantity cannot be lower than tickets already sold`);
+				}
+				Object.assign(existing, {
+					name: ticket.name,
+					price: ticket.price,
+					quantity: ticket.quantity,
+					limitPerPerson: ticket.limitPerPerson ?? null,
+					description: ticket.description ?? null,
+					includeCharges: ticket.includeCharges ?? false,
+					status: Number(ticket.quantity) <= Number(existing.quantitySold || 0) ? 'sold_out' : existing.status === 'sold_out' ? 'active' : existing.status,
+				});
+				usedExistingIds.add(existing.id);
+				nextTypes.push(existing);
+			} else {
+				nextTypes.push(this.ticketTypesRepository.create({ ...ticket, event }));
+			}
+		}
+
+		const removedTypes = existingTypes.filter((ticket) => !usedExistingIds.has(ticket.id));
+		for (const removed of removedTypes) {
+			if (Number(removed.quantitySold || 0) > 0) {
+				removed.status = 'paused';
+				nextTypes.push(removed);
+				continue;
+			}
+			await this.ticketTypesRepository.delete({ id: removed.id });
+		}
+
+		return nextTypes;
 	}
 
 	private isAdminRole(role: Role) {

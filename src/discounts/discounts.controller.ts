@@ -5,7 +5,7 @@ import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateDiscountCouponDto } from './dto/create-discount-coupon.dto';
-import { UpdateDiscountCouponStatusDto } from './dto/update-discount-coupon.dto';
+import { UpdateDiscountCouponDto, UpdateDiscountCouponStatusDto } from './dto/update-discount-coupon.dto';
 import { DiscountsService } from './discounts.service';
 
 @ApiTags('Discounts')
@@ -24,10 +24,32 @@ export class DiscountsController {
 		return this.discountsService.findAll(organizationId, req.user);
 	}
 
+	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Get('influencer/mine')
+	findInfluencerCampaigns(@Req() req: { user: { id: string; role: Role } }) {
+		return this.discountsService.findInfluencerCampaigns(req.user);
+	}
+
+	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Get('influencer/earnings')
+	findInfluencerEarnings(@Req() req: { user: { id: string; role: Role } }) {
+		return this.discountsService.findInfluencerEarnings(req.user);
+	}
+
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)
 	@Post()
 	create(@Body() dto: CreateDiscountCouponDto, @Req() req: { user: { id: string; role: Role } }) {
 		return this.discountsService.create(dto, req.user);
+	}
+
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)
+	@Patch(':id')
+	update(
+		@Param('id') id: string,
+		@Body() dto: UpdateDiscountCouponDto,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.discountsService.update(id, dto, req.user);
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)

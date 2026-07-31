@@ -44,6 +44,10 @@ export class CartService implements OnModuleDestroy {
 			host: this.configService.get<string>('REDIS_HOST', '127.0.0.1'),
 			port: this.configService.get<number>('REDIS_PORT', 6379),
 			db: this.configService.get<number>('REDIS_DB', 0),
+			tls:
+				this.configService.get<string>('REDIS_TLS', 'false') === 'true'
+					? {}
+					: undefined,
 			maxRetriesPerRequest: 3,
 			lazyConnect: false,
 		});

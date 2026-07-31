@@ -29,6 +29,7 @@ import { TicketOrdersModule } from './ticket-orders/ticket-orders.module';
 import { NewsletterModule } from './newsletter/newsletter.module';
 import { VendorCategoriesModule } from './vendor-categories/vendor-categories.module';
 import { VendorCatalogueModule } from './vendor-catalogue/vendor-catalogue.module';
+import { RefundsModule } from './refunds/refunds.module';
 import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
 import { EventEntity } from './events/entities/event.entity';
@@ -60,7 +61,14 @@ import { AuditLogEntity } from './audit/entities/audit-log.entity';
 import { Upload } from './uploads/entities/upload.entity';
 import { VendorCategoryEntity } from './vendor-categories/entities/vendor-category.entity';
 import { VendorCatalogueItemEntity } from './vendor-catalogue/entities/vendor-catalogue-item.entity';
+import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
 import { DatabaseModule } from './database/database.module';
+
+function isEnabled(value?: string | boolean | number | null) {
+	return ['true', '1', 'yes', 'require', 'required'].includes(
+		String(value ?? '').trim().toLowerCase(),
+	);
+}
 
 @Module({
 	imports: [
@@ -75,6 +83,17 @@ import { DatabaseModule } from './database/database.module';
 				username: configService.get<string>('DB_USERNAME', 'postgres'),
 				password: configService.get<string>('DB_PASSWORD', 'postgres'),
 				database: configService.get<string>('DB_NAME', 'aquzera'),
+				ssl: isEnabled(
+					configService.get<string>('DB_SSL') ||
+						configService.get<string>('DATABASE_SSL') ||
+						configService.get<string>('PGSSLMODE'),
+				)
+					? {
+							rejectUnauthorized: isEnabled(
+								configService.get<string>('DB_SSL_REJECT_UNAUTHORIZED'),
+							),
+						}
+					: false,
 				synchronize:
 					configService.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
 				autoLoadEntities: false,
@@ -108,6 +127,7 @@ import { DatabaseModule } from './database/database.module';
 					IssuedTicketEntity,
 					VendorCategoryEntity,
 					VendorCatalogueItemEntity,
+					RefundRequestEntity,
 				],
 			}),
 		}),
@@ -119,6 +139,10 @@ import { DatabaseModule } from './database/database.module';
 					host: configService.get<string>('REDIS_HOST', '127.0.0.1'),
 					port: configService.get<number>('REDIS_PORT', 6379),
 					db: configService.get<number>('REDIS_DB', 0),
+					tls:
+						configService.get<string>('REDIS_TLS', 'false') === 'true'
+							? {}
+							: undefined,
 				},
 				prefix: 'aquzera',
 				defaultJobOptions: {
@@ -160,6 +184,7 @@ import { DatabaseModule } from './database/database.module';
 			NewsletterModule,
 			VendorCategoriesModule,
 			VendorCatalogueModule,
+			RefundsModule,
 		],
 	})
 export class AppModule {}

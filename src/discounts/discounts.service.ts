@@ -7,7 +7,11 @@ import { EventEntity } from '../events/entities/event.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { Role } from '../common/enums/role.enum';
 import { CreateDiscountCouponDto } from './dto/create-discount-coupon.dto';
+import { UpdateDiscountCouponDto } from './dto/update-discount-coupon.dto';
 import { DiscountCouponEntity } from './entities/discount-coupon.entity';
+import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { ConfigService } from '@nestjs/config';
+import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
 
 @Injectable()
 export class DiscountsService {
@@ -22,6 +26,11 @@ export class DiscountsService {
 		private readonly agentsRepository: Repository<AgentEntity>,
 		@InjectRepository(UserEntity)
 		private readonly usersRepository: Repository<UserEntity>,
+		@InjectRepository(TicketOrderEntity)
+		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
+		@InjectRepository(ReferralCodeEntity)
+		private readonly referralCodesRepository: Repository<ReferralCodeEntity>,
+		private readonly configService: ConfigService,
 	) {}
 
 	async findAll(organizationId?: string, user?: { id: string; role: Role }) {
@@ -93,6 +102,103 @@ export class DiscountsService {
 		);
 	}
 
+	async findInfluencerCampaigns(user: { id: string; role: Role }) {
+		const agent = await this.findAgentForInfluencerUser(user.id);
+		if (!agent) return [];
+
+		return this.couponsRepository.find({
+			where: { agent: { id: agent.id } },
+			order: { createdAt: 'DESC' },
+		});
+	}
+
+	async findInfluencerEarnings(user: { id: string; role: Role }) {
+		const agent = await this.findAgentForInfluencerUser(user.id);
+		if (!agent) {
+			return {
+				summary: {
+					totalRevenue: 0,
+					totalCommission: 0,
+					pending: 0,
+					available: 0,
+					withdrawn: 0,
+					holdDays: this.getInfluencerHoldDays(),
+					stripeConnected: false,
+					canWithdraw: false,
+				},
+				rows: [],
+			};
+		}
+
+		const orders = await this.ticketOrdersRepository.find({
+			where: {
+				referralCode: {
+					agent: { id: agent.id },
+				},
+				status: 'paid',
+			},
+			order: { paidAt: 'DESC', createdAt: 'DESC' },
+		});
+		const coupons = await this.couponsRepository.find({
+			where: { agent: { id: agent.id } },
+		});
+		const couponByCode = new Map(coupons.map((coupon) => [coupon.code.toUpperCase(), coupon]));
+		const rows = orders.flatMap((order) => {
+			const coupon = order.referralCode?.code
+				? couponByCode.get(order.referralCode.code.toUpperCase())
+				: undefined;
+			const commissionPercent = this.resolveCommissionPercent(order, coupon);
+			const availableAt = this.calculateAvailableAt(order.event);
+			const earningStatus = availableAt.getTime() <= Date.now() ? 'available' : 'pending';
+
+			return order.items.map((item) => {
+				const totalCost = Number(item.lineTotal || 0);
+				const commission = totalCost * (commissionPercent / 100);
+				return {
+					id: `${order.id}-${item.id}`,
+					orderId: order.id,
+					date: (order.paidAt || order.createdAt).toISOString(),
+					event: order.event.title,
+					eventId: order.event.id,
+					eventStartsAt: order.event.startsAt?.toISOString?.() ?? order.event.startsAt,
+					item: item.ticketName,
+					quantity: item.quantity,
+					totalCost,
+					commission,
+					commissionPercent,
+					status: earningStatus,
+					availableAt: availableAt.toISOString(),
+					couponCode: order.referralCode?.code ?? null,
+					currency: order.currency,
+				};
+			});
+		});
+
+		const totalRevenue = rows.reduce((sum, row) => sum + row.totalCost, 0);
+		const totalCommission = rows.reduce((sum, row) => sum + row.commission, 0);
+		const pending = rows
+			.filter((row) => row.status === 'pending')
+			.reduce((sum, row) => sum + row.commission, 0);
+		const available = rows
+			.filter((row) => row.status === 'available')
+			.reduce((sum, row) => sum + row.commission, 0);
+
+		return {
+			influencer: agent,
+			summary: {
+				totalRevenue,
+				totalCommission,
+				pending,
+				available,
+				withdrawn: 0,
+				holdDays: this.getInfluencerHoldDays(),
+				stripeConnected: false,
+				canWithdraw: available > 0,
+			},
+			rows,
+		};
+	}
+
 	async updateStatus(id: string, status: DiscountCouponEntity['status'], user?: { id: string; role: Role }) {
 		const coupon = await this.couponsRepository.findOne({ where: { id } });
 		if (!coupon) throw new NotFoundException('Discount coupon not found');
@@ -109,6 +215,29 @@ export class DiscountsService {
 		return this.couponsRepository.save(coupon);
 	}
 
+	async update(id: string, dto: UpdateDiscountCouponDto, user?: { id: string; role: Role }) {
+		const coupon = await this.couponsRepository.findOne({ where: { id } });
+		if (!coupon) throw new NotFoundException('Discount coupon not found');
+		if (user && !this.isAdminRole(user.role) && coupon.organization.ownerUserId !== user.id) {
+			throw new ForbiddenException('You cannot update discounts for this organization');
+		}
+
+		const startsAt = dto.startsAt !== undefined ? new Date(dto.startsAt) : coupon.startsAt;
+		const endsAt = dto.endsAt !== undefined ? new Date(dto.endsAt) : coupon.endsAt;
+		if (startsAt && endsAt && endsAt < startsAt) {
+			throw new BadRequestException('Coupon expiry date cannot be before start date');
+		}
+		if (dto.maxUses !== undefined && dto.maxUses < coupon.usesCount) {
+			throw new BadRequestException('Max uses cannot be lower than the current usage count');
+		}
+
+		if (dto.startsAt !== undefined) coupon.startsAt = startsAt;
+		if (dto.endsAt !== undefined) coupon.endsAt = endsAt;
+		if (dto.maxUses !== undefined) coupon.maxUses = dto.maxUses;
+
+		return this.couponsRepository.save(coupon);
+	}
+
 	async approve(id: string, user: { id: string; role: Role }) {
 		const coupon = await this.couponsRepository.findOne({ where: { id } });
 		if (!coupon) throw new NotFoundException('Discount coupon not found');
@@ -116,6 +245,7 @@ export class DiscountsService {
 
 		agent.status = 'active';
 		await this.agentsRepository.save(agent);
+		await this.ensureReferralCodeForCoupon(coupon, agent);
 		coupon.agent = agent;
 		coupon.status = 'active';
 		coupon.approvedByInfluencerAt = new Date();
@@ -135,6 +265,54 @@ export class DiscountsService {
 
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF].includes(role);
+	}
+
+	private async findAgentForInfluencerUser(userId: string) {
+		const user = await this.usersRepository.findOne({ where: { id: userId } });
+		if (!this.isValidInfluencerUser(user)) {
+			throw new ForbiddenException('Only influencer accounts can access this resource');
+		}
+
+		return this.agentsRepository.findOne({
+			where: [
+				{ user: { id: user.id } },
+				{ email: user.email.toLowerCase() },
+			],
+			order: { createdAt: 'DESC' },
+		});
+	}
+
+	private resolveCommissionPercent(order: TicketOrderEntity, coupon?: DiscountCouponEntity) {
+		if (coupon) return Number(coupon.influencerCommissionPercent || 0);
+		const code = order.referralCode?.code;
+		if (!code) return 0;
+		return 10;
+	}
+
+	private async ensureReferralCodeForCoupon(coupon: DiscountCouponEntity, agent: AgentEntity) {
+		const code = coupon.code.trim().toUpperCase();
+		const existing = await this.referralCodesRepository.findOne({ where: { code } });
+		if (existing) return existing;
+		return this.referralCodesRepository.save(
+			this.referralCodesRepository.create({
+				agent,
+				event: coupon.event ?? null,
+				code,
+				status: 'active',
+			}),
+		);
+	}
+
+	private calculateAvailableAt(event: EventEntity) {
+		const holdDays = this.getInfluencerHoldDays();
+		const anchor = event.endsAt || event.startsAt || new Date();
+		const availableAt = new Date(anchor);
+		availableAt.setDate(availableAt.getDate() + holdDays);
+		return availableAt;
+	}
+
+	private getInfluencerHoldDays() {
+		return Number(this.configService.get<string>('INFLUENCER_EARNINGS_HOLD_DAYS', '3'));
 	}
 
 	private async ensureOrganizationAccess(organizationId: string, ownerUserId: string) {
