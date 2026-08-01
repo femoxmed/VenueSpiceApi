@@ -85,6 +85,14 @@ export class VendorCategoriesService {
 	async seedDefaults() {
 		for (const [index, seed] of defaultVendorCategories.entries()) {
 			const slug = seed.slug || this.slugify(seed.label);
+			const existingByLabel = await this.categoriesRepository.findOne({
+				where: { label: seed.label.trim() },
+			});
+
+			if (existingByLabel) {
+				continue;
+			}
+
 			const existing = await this.categoriesRepository.findOne({ where: { slug } });
 			const payload = {
 				label: seed.label.trim(),

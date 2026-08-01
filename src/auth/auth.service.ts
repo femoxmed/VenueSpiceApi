@@ -747,9 +747,16 @@ export class AuthService {
 
 	private async queueAuthEmail(to: string, subject: string, html: string) {
 		try {
+			await this.notificationsService.sendEmailNow(to, subject, html);
+			return;
+		} catch (error) {
+			console.error('Failed to send auth email immediately', error);
+		}
+
+		try {
 			await this.notificationsService.queueEmail(to, subject, html);
 		} catch (error) {
-			console.error('Failed to queue auth email', error);
+			console.error('Failed to queue auth email fallback', error);
 		}
 	}
 

@@ -70,6 +70,16 @@ function isEnabled(value?: string | boolean | number | null) {
 	);
 }
 
+function getBullQueuePrefix(value?: string | null) {
+	const prefix = String(value || 'venue-spice').trim();
+
+	if (prefix.startsWith('{') && prefix.includes('}')) {
+		return prefix;
+	}
+
+	return `{${prefix}}`;
+}
+
 @Module({
 	imports: [
 		ConfigModule.forRoot({ isGlobal: true }),
@@ -144,7 +154,7 @@ function isEnabled(value?: string | boolean | number | null) {
 							? {}
 							: undefined,
 				},
-				prefix: 'aquzera',
+				prefix: getBullQueuePrefix(configService.get<string>('QUEUE_PREFIX')),
 				defaultJobOptions: {
 					attempts: configService.get<number>('QUEUE_RETRIES', 3),
 					backoff: {

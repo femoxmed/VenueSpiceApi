@@ -4,9 +4,13 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "start": "node dist/main",
+    "start": "npm run seed:vendor-categories && node dist/main",
     "dev": "nest start --watch",
     "seed": "ts-node src/simple-seed.ts",
+    "seed:vendor-categories": "node dist/seed-vendor-categories.js",
+    "seed:vendor-categories:dev": "ts-node src/seed-vendor-categories.ts",
+    "sync:super-admins": "node dist/sync-super-admins.js",
+    "sync:super-admins:dev": "ts-node src/sync-super-admins.ts",
     "typeorm": "typeorm-ts-node-commonjs -d src/database/database.module.ts"
   },
   "dependencies": {
