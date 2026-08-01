@@ -1,6 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
+import { createHash } from 'crypto';
 import Redis from 'ioredis';
 import { In, IsNull, Not, Repository } from 'typeorm';
 import { BlogEntity } from './entities/blog.entity';
@@ -35,11 +36,13 @@ export class BlogsService implements OnModuleDestroy {
 		await this.redis.quit().catch(() => undefined);
 	}
 
-	findAll() {
+	findAll(user?: { id: string; role: Role }) {
+		const where = user?.role === Role.WRITER ? { authorId: user.id } : {};
 		return this.blogs.find({
+			where,
 			order: { createdAt: 'DESC' },
 			relations: ['author', 'bannerImage', 'thumbnailImage', 'relatedProducts'],
-		});
+		}).then((items) => this.withViews(items));
 	}
 
 	async publicList(page = 1, limit = 12) {
@@ -68,6 +71,23 @@ export class BlogsService implements OnModuleDestroy {
 		return this.withViews(items);
 	}
 
+	async popular(limit = 6) {
+		const items = await this.blogs.find({
+			where: { status: 'published' },
+			order: { publishedAt: 'DESC', createdAt: 'DESC' },
+			relations: ['author', 'thumbnailImage'],
+			take: 50,
+		});
+		const withViews = await this.withViews(items);
+		return withViews
+			.sort((a: any, b: any) => {
+				const aScore = Number(a.viewCount || 0) + Number(a.uniqueViewCount || 0) * 3;
+				const bScore = Number(b.viewCount || 0) + Number(b.uniqueViewCount || 0) * 3;
+				return bScore - aScore;
+			})
+			.slice(0, Math.min(12, Math.max(1, limit || 6)));
+	}
+
 	async publicOne(slug: string) {
 		const blog = await this.blogs.findOne({
 			where: { slug, status: 'published' },
@@ -90,14 +110,23 @@ export class BlogsService implements OnModuleDestroy {
 		return (await this.withViews([blog]))[0];
 	}
 
-	async recordView(slug: string) {
+	async recordView(slug: string, request?: any) {
 		const blog = await this.blogs.findOneBy({ slug, status: 'published' });
 		if (!blog) throw new BadRequestException('Blog not found');
 		try {
-			const views = await this.redis.incr(this.viewKey(blog.id));
-			return { views };
+			const viewerKey = this.viewerKey(blog.id, request);
+			const uniqueRecorded = await this.redis.set(viewerKey, '1', 'EX', 60 * 60 * 24, 'NX');
+			const pipeline = this.redis.pipeline();
+			pipeline.incr(this.viewKey(blog.id));
+			if (uniqueRecorded) pipeline.incr(this.uniqueViewKey(blog.id));
+			const results = await pipeline.exec();
+			const views = Number(results?.[0]?.[1] || 0);
+			const uniqueViews = uniqueRecorded
+				? Number(results?.[1]?.[1] || 0)
+				: Number(await this.redis.get(this.uniqueViewKey(blog.id)) || 0);
+			return { views, uniqueViews };
 		} catch {
-			return { views: 0 };
+			return { views: 0, uniqueViews: 0 };
 		}
 	}
 
@@ -167,7 +196,18 @@ export class BlogsService implements OnModuleDestroy {
 		return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 	}
 
-	private viewKey(id: string) { return `blog:views:${id}`; }
+	private viewKey(id: string) { return `{blog:${id}}:views`; }
+
+	private uniqueViewKey(id: string) { return `{blog:${id}}:views:unique`; }
+
+	private viewerKey(id: string, request?: any) {
+		const forwardedFor = String(request?.headers?.['x-forwarded-for'] || '').split(',')[0].trim();
+		const ip = forwardedFor || request?.ip || request?.socket?.remoteAddress || 'unknown';
+		const userAgent = request?.headers?.['user-agent'] || 'unknown';
+		const day = new Date().toISOString().slice(0, 10);
+		const hash = createHash('sha256').update(`${ip}:${userAgent}:${day}`).digest('hex');
+		return `{blog:${id}}:viewer:${hash}`;
+	}
 
 	private normalizeUploadUrl(upload?: { key?: string; url?: string; path?: string } | null) {
 		if (!upload?.key) return;
@@ -177,10 +217,31 @@ export class BlogsService implements OnModuleDestroy {
 
 	private async withViews(items: BlogEntity[]) {
 		let counts = items.map(() => 0);
+		let uniqueCounts = items.map(() => 0);
 		try {
-			const values = await this.redis.mget(items.map((item) => this.viewKey(item.id)));
-			counts = values.map((value) => Number(value || 0));
+			const values = await Promise.all(
+				items.map(async (item) => {
+					const [views, uniqueViews] = await Promise.all([
+						this.redis.get(this.viewKey(item.id)),
+						this.redis.get(this.uniqueViewKey(item.id)),
+					]);
+					return { views: Number(views || 0), uniqueViews: Number(uniqueViews || 0) };
+				}),
+			);
+			counts = values.map((value) => value.views);
+			uniqueCounts = values.map((value) => value.uniqueViews);
 		} catch {}
-		return items.map((item, index) => ({ ...item, viewCount: counts[index] }));
+		return items.map((item, index) => ({
+			...item,
+			author: item.author
+				? {
+						id: item.author.id,
+						fullName: item.author.fullName,
+						role: item.author.role,
+					}
+				: undefined,
+			viewCount: counts[index],
+			uniqueViewCount: uniqueCounts[index],
+		}));
 	}
 }

@@ -4,9 +4,11 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "start": "npm run seed:vendor-categories && node dist/main",
+    "start": "npm run seed:vendor-categories && npm run seed:blogs && node dist/main",
     "dev": "nest start --watch",
     "seed": "ts-node src/simple-seed.ts",
+    "seed:blogs": "node dist/seed-blogs.js",
+    "seed:blogs:dev": "ts-node src/seed-blogs.ts",
     "seed:vendor-categories": "node dist/seed-vendor-categories.js",
     "seed:vendor-categories:dev": "ts-node src/seed-vendor-categories.ts",
     "sync:super-admins": "node dist/sync-super-admins.js",

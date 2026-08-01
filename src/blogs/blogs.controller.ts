@@ -26,21 +26,26 @@ export class BlogsController {
 		return this.blogsService.featured(Number(limit));
 	}
 
+	@Get('public/popular')
+	popular(@Query('limit') limit?: string) {
+		return this.blogsService.popular(Number(limit));
+	}
+
 	@Get('public/:slug')
 	publicOne(@Param('slug') slug: string) {
 		return this.blogsService.publicOne(slug);
 	}
 
 	@Post('public/:slug/view')
-	recordView(@Param('slug') slug: string) {
-		return this.blogsService.recordView(slug);
+	recordView(@Param('slug') slug: string, @Req() req: any) {
+		return this.blogsService.recordView(slug, req);
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.ADMIN, Role.WRITER)
 	@Get()
-	findAll() {
-		return this.blogsService.findAll();
+	findAll(@Req() req: any) {
+		return this.blogsService.findAll(req.user);
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)

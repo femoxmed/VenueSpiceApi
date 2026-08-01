@@ -1,6 +1,6 @@
-import { DataSource, Repository } from 'typeorm';
+import * as bcrypt from 'bcrypt';
+import { DataSource } from 'typeorm';
 import { BlogEntity } from '../../blogs/entities/blog.entity';
-import { ProductEntity } from '../../products/entities/product.entity';
 import { UserEntity } from '../../auth/entities/user.entity';
 import { Role } from '../../common/enums/role.enum';
 
@@ -10,234 +10,180 @@ type BlogSeed = {
 	excerpt: string;
 	content: string;
 	category: string;
-	status: 'draft' | 'published';
-	publishedAt: Date | null;
+	publishedAt: Date;
 	featuredAt: Date | null;
 };
 
 const blogSeeds: BlogSeed[] = [
 	{
-		title: 'Why Better Water Changes the Rhythm of Your Day',
-		slug: 'why-better-water-changes-the-rhythm-of-your-day',
-		excerpt:
-			'From the first glass in the morning to the final cup at night, dependable water quietly improves the routines that matter.',
-		content: `Most conversations about wellbeing begin with ambitious changes. Better water asks for something simpler: improve the resource you reach for throughout the day.
+		title: 'How to Plan an Event Guests Actually Talk About',
+		slug: 'how-to-plan-an-event-guests-actually-talk-about',
+		excerpt: 'Memorable events are built before the first guest arrives. Here is how organizers can turn logistics into atmosphere.',
+		category: 'Event Planning',
+		publishedAt: new Date('2026-07-20T09:00:00.000Z'),
+		featuredAt: new Date('2026-07-20T09:00:00.000Z'),
+		content: `A great event rarely feels complicated to the people attending it. That ease is usually the result of careful planning, clear decisions, and a team that understands what the night is meant to feel like.
 
-When clean water is consistently available, hydration becomes less of a task. Morning routines move more easily, cooking feels more considered, and hosting no longer begins with wondering whether there is enough bottled water in the house.
+Start with one sharp promise. Is the event about discovery, celebration, networking, music, faith, food, or community? Once the promise is clear, every decision has a useful filter.
 
-The quality of water also shapes taste. Tea becomes clearer, coffee feels more balanced, and the natural character of fresh ingredients is easier to notice. These are modest differences, but they repeat every day.
+The venue should support the rhythm of the event. Think through arrival, check-in, queue movement, restrooms, vendor placement, backstage access, and how people will leave at the end.
 
-A well-designed purification system should sit quietly within the home. It should be dependable, intuitive, and easy to maintain. The best technology supports daily life without asking to become the centre of it.
+Guests remember transitions. The walk from entry to first drink, the wait before the headline act, the moment after a panel ends, and the final ten minutes all shape the story people tell later.
 
-Better living is often built from small decisions made consistently. Choosing better water is one of the few that can touch nearly every hour of the day.`,
-		category: 'Water & Wellness',
-		status: 'published',
-		publishedAt: new Date('2026-05-28T09:00:00.000Z'),
-		featuredAt: new Date('2026-05-28T09:00:00.000Z'),
+Ticketing is part of the experience too. Clear tiers, honest descriptions, fast checkout, and mobile-friendly confirmation reduce anxiety and build trust before the event begins.
+
+The best event planning is not just a checklist. It is the art of removing friction so the audience can feel the reason they came.`,
 	},
 	{
-		title: 'Designing a Kitchen Around Everyday Ease',
-		slug: 'designing-a-kitchen-around-everyday-ease',
-		excerpt:
-			'A beautiful kitchen works hardest in the details: clear surfaces, intuitive movement, and essentials placed exactly where they are needed.',
-		content: `A kitchen can be visually impressive and still feel difficult to use. The spaces we enjoy most are designed around movement before decoration.
+		title: 'Choosing Vendors Without Guesswork',
+		slug: 'choosing-vendors-without-guesswork',
+		excerpt: 'The right vendor can lift an event. The wrong one can quietly damage the whole guest experience.',
+		category: 'Vendors',
+		publishedAt: new Date('2026-07-16T09:00:00.000Z'),
+		featuredAt: new Date('2026-07-16T09:00:00.000Z'),
+		content: `Vendors are not just suppliers. They are part of the event your guests will experience directly.
 
-Start with the journeys repeated every day. Where do you fill a glass, prepare breakfast, wash produce, and make tea? Keeping those actions within a comfortable working zone reduces clutter and makes the room feel calmer.
+Before comparing prices, define the job clearly. A caterer needs guest count, service style, timing, location, access, and dietary expectations. A DJ needs audience profile, program flow, sound restrictions, and the moments that matter most.
 
-Appliances deserve the same consideration. Choose pieces that earn their place through regular use, then give them enough room to work without dominating the counter. Integrated water systems are especially effective because they replace several temporary objects with one dependable source.
+Look for proof of reliability. Photos are useful, but reviews, past event types, response time, and operational questions reveal more than a polished gallery.
 
-Materials matter, but restraint matters more. A limited palette allows texture, natural light, and thoughtfully selected objects to carry the room. The result feels intentional rather than overworked.
+Ask how the vendor handles pressure. What happens if the weather changes, a delivery is delayed, power fails, or the crowd is larger than expected? Calm answers matter.
 
-Good design is not only what a kitchen looks like when it is empty. It is how naturally the room supports a busy morning, a quiet evening, and a table full of people.`,
-		category: 'Design & Living',
-		status: 'published',
-		publishedAt: new Date('2026-05-20T09:00:00.000Z'),
-		featuredAt: new Date('2026-05-20T09:00:00.000Z'),
+For organizers, a strong vendor directory shortens the search and makes comparison easier. For vendors, complete profiles, clear categories, and current catalogues make trust visible.
+
+The goal is not to choose the most expensive vendor. It is to choose the one whose preparation matches the promise of your event.`,
 	},
 	{
-		title: 'A Practical Guide to Choosing a Home Water Purifier',
-		slug: 'a-practical-guide-to-choosing-a-home-water-purifier',
-		excerpt:
-			'The right purifier depends on your water, household, available space, and the level of convenience you expect every day.',
-		content: `Choosing a purifier should begin with your water source. Municipal supply, borehole water, and stored water can carry different concerns, so a useful recommendation depends on understanding what needs to be reduced or removed.
+		title: 'Why Influencer Campaigns Work Best Before Tickets Slow Down',
+		slug: 'why-influencer-campaigns-work-best-before-tickets-slow-down',
+		excerpt: 'Influencer marketing works better as momentum, not rescue. Invite creators early and give them something worth sharing.',
+		category: 'Influencer Marketing',
+		publishedAt: new Date('2026-07-11T09:00:00.000Z'),
+		featuredAt: new Date('2026-07-11T09:00:00.000Z'),
+		content: `Influencer campaigns are often treated like emergency promotion. Sales slow down, pressure rises, and organizers start asking creators to push harder. That is usually too late.
 
-Next, consider household demand. A larger family or a home that hosts regularly will need stronger flow and capacity than a compact apartment. Hot and cold dispensing can also reduce the need for separate kettles, chillers, and bottled water storage.
+Creators perform best when they have time to understand the event and make the invitation feel natural to their audience. Early campaigns create awareness, social proof, and repeated exposure before urgency arrives.
 
-Maintenance is part of the product, not an afterthought. Ask how often filters need changing, whether service is available locally, and how clearly the system communicates when attention is required.
+Give each influencer a clear offer. A coupon code, tracked sales, campaign brief, approved assets, and payout rules remove confusion and make collaboration easier.
 
-Finally, think about placement. Measure the intended area, check access to power and water, and choose a finish that belongs naturally in the room.
+The best creators do not only post. They translate the event into language their community already understands. That is why niche fit matters as much as follower count.
 
-The best purifier is not simply the model with the longest specification sheet. It is the one that matches your water conditions and becomes effortless to live with.`,
-		category: 'Buying Guides',
-		status: 'published',
-		publishedAt: new Date('2026-05-12T09:00:00.000Z'),
-		featuredAt: new Date('2026-05-12T09:00:00.000Z'),
+Refund windows and payout timing should also be clear. If buyers can request refunds before an event, influencer earnings should become withdrawable after the refund-risk period has passed.
+
+Promotion is strongest when it feels like participation. Bring creators in early enough to help the event gather energy.`,
 	},
 	{
-		title: 'The Quiet Luxury of Being Prepared',
-		slug: 'the-quiet-luxury-of-being-prepared',
-		excerpt:
-			'Real comfort often comes from systems that are maintained before they become urgent.',
-		content: `There is a particular ease in knowing the essentials of a home are ready before they are needed.
-
-Water systems reward this kind of attention. Regular filter changes protect performance, preserve taste, and help each internal component work as intended.
-
-This article is being prepared by the Aquzera editorial team and will include a simple maintenance calendar for modern households.`,
-		category: 'Care & Maintenance',
-		status: 'draft',
-		publishedAt: null,
+		title: 'Ticket Tiers That Make Buyers Decide Faster',
+		slug: 'ticket-tiers-that-make-buyers-decide-faster',
+		excerpt: 'Good ticket tiers are easy to understand, easy to compare, and honest about what each guest receives.',
+		category: 'Ticketing',
+		publishedAt: new Date('2026-07-07T09:00:00.000Z'),
 		featuredAt: null,
+		content: `Ticket tiers can help sales, but only when buyers understand the difference quickly.
+
+Start with names people already recognize. Regular, VIP, Table for 5, Early Bird, Backstage, and Group Access are clearer than creative labels that need explanation.
+
+Every tier should answer three questions: what do I get, how many people does it cover, and why is it worth this price? If the answer is vague, buyers hesitate.
+
+Limit the number of options. Too many tiers make the buyer compare instead of commit. A simple structure often converts better than a long menu.
+
+Use scarcity carefully. Quantity limits, date-based pricing, and early bird windows work when they are real. Fake urgency damages trust.
+
+Good ticketing is not just payment collection. It is decision design. The easier the choice feels, the faster a guest moves from interest to purchase.`,
 	},
 	{
-		title: 'Five Simple Ways to Drink More Water Without Tracking It',
-		slug: 'five-simple-ways-to-drink-more-water-without-tracking-it',
-		excerpt:
-			'Better hydration does not need another app. A few thoughtful changes to your environment can make it feel automatic.',
-		content: `Hydration advice often begins with a target and a tracker. For many people, the easier approach is to shape the environment so drinking water becomes the natural next action.
+		title: 'What Attendees Need After Buying a Ticket',
+		slug: 'what-attendees-need-after-buying-a-ticket',
+		excerpt: 'The sale is not the end of the journey. Confirmation, reminders, and clear support reduce refunds and missed arrivals.',
+		category: 'Attendee Experience',
+		publishedAt: new Date('2026-07-02T09:00:00.000Z'),
+		featuredAt: null,
+		content: `After a guest buys a ticket, they need confidence.
 
-Begin the day with water already within reach. A glass beside your breakfast place or a bottle near your workspace removes the small delay that turns intention into postponement.
+The confirmation email should make the next step obvious. It should show the event name, date, venue, ticket type, quantity, buyer details, and a simple way to find the ticket again.
 
-Make the water enjoyable. Temperature matters, as does taste. When filtered water is consistently cold, clear, and pleasant, people reach for it more often without needing reminders.
+Guests also need reminders. A short message before the event can reduce missed arrivals and support requests. Include time, location, entry rules, parking notes, and anything guests should bring.
 
-Connect drinking water to routines that already exist. Have a glass after brushing your teeth, before each meal, and whenever you return home. Existing habits make reliable anchors.
+Refund information should be easy to find. When policies are hidden, buyers become anxious and support teams spend more time explaining.
 
-Use a vessel you genuinely enjoy. A well-balanced glass or reusable bottle sounds insignificant, but objects that feel good to use are used more often.
+For organizers, post-purchase clarity reduces pressure on event day. For attendees, it turns a transaction into a plan.
 
-Finally, keep access simple. The shorter the distance between wanting water and having it, the easier hydration becomes. Convenience is not laziness; it is thoughtful design.`,
-		category: 'Water & Wellness',
-		status: 'published',
-		publishedAt: new Date('2026-05-08T09:00:00.000Z'),
-		featuredAt: new Date('2026-05-08T09:00:00.000Z'),
+A smooth event starts long before check-in. It starts when the buyer feels sure that the ticket, the details, and the organizer are all reliable.`,
 	},
 	{
-		title: 'What Good Water Brings to Tea and Coffee',
-		slug: 'what-good-water-brings-to-tea-and-coffee',
-		excerpt:
-			'Water makes up most of every cup. Improving it can reveal sweetness, clarity, and balance that were already waiting in the beans or leaves.',
-		content: `We spend time choosing coffee beans and tea leaves, then often overlook the ingredient that fills almost the entire cup.
+		title: 'How Vendors Can Build a Catalogue That Gets Booked',
+		slug: 'how-vendors-can-build-a-catalogue-that-gets-booked',
+		excerpt: 'A vendor catalogue should help organizers picture the service, compare options, and take action without needing a long back-and-forth.',
+		category: 'Vendor Growth',
+		publishedAt: new Date('2026-06-28T09:00:00.000Z'),
+		featuredAt: null,
+		content: `A vendor profile creates attention. A vendor catalogue creates decisions.
 
-Water carries flavour from coffee and tea into the drink. If it has a strong odour, excessive hardness, or an unbalanced mineral profile, delicate notes can become muted or harsh.
+Each catalogue item should have a clear name, strong image, price or price range, minimum order quantity, unit measure, and a short description that explains the result.
 
-Filtered water creates a cleaner starting point. It allows floral teas to feel more open, dark roasts to taste less blunt, and lighter coffees to show their natural acidity without becoming sharp.
+Avoid vague descriptions. Instead of saying "premium catering," explain the menu style, serving format, number of guests covered, setup needs, and what is included.
 
-Temperature matters too. Tea varieties respond to different levels of heat, while coffee benefits from water that is hot enough to extract flavour without scorching it. Reliable access to hot water makes consistency easier.
+Images matter because organizers are buying confidence. Use bright, real examples of your work. If the service is not visual, show the team, setup, equipment, or final event environment.
 
-The improvement is not about making every cup complicated. It is the opposite: when the water is right, fewer adjustments are needed and the character of the drink can speak for itself.`,
-		category: 'Taste & Culture',
-		status: 'published',
-		publishedAt: new Date('2026-05-04T09:00:00.000Z'),
-		featuredAt: new Date('2026-05-04T09:00:00.000Z'),
-	},
-	{
-		title: 'How to Build a Calmer Morning Routine',
-		slug: 'how-to-build-a-calmer-morning-routine',
-		excerpt:
-			'A calmer morning is less about waking earlier and more about removing decisions from the first hour of the day.',
-		content: `The tone of a morning is often set by friction: searching for what you need, making too many choices, or beginning the day already behind.
+Keep prices current. Even when final quotes depend on the event, a starting range helps organizers know whether the vendor fits their budget.
 
-Prepare the environment the evening before. Clear the kitchen surface, set out one or two breakfast essentials, and make sure clean drinking water is ready. These actions create a visible invitation to begin slowly.
-
-Keep the first sequence simple. Water, light, movement, and nourishment are reliable foundations. They support the body before notifications and decisions begin competing for attention.
-
-Avoid designing an ideal routine that only works on quiet days. A useful routine should survive a late start, a busy household, and an unexpected change of plan.
-
-Calm is not always silence or perfect order. Often it is simply the confidence that the essentials are available and the next step is clear.`,
-		category: 'Everyday Rituals',
-		status: 'published',
-		publishedAt: new Date('2026-04-28T09:00:00.000Z'),
-		featuredAt: new Date('2026-04-28T09:00:00.000Z'),
-	},
-	{
-		title: 'The Real Cost of Relying on Bottled Water at Home',
-		slug: 'the-real-cost-of-relying-on-bottled-water-at-home',
-		excerpt:
-			'The price on the bottle is only one part of the story. Storage, transport, waste, and interrupted supply all carry a cost.',
-		content: `Bottled water can feel convenient because each purchase is familiar. Over time, however, the household cost extends beyond the amount paid at the shop.
-
-There is the work of transport: carrying packs, arranging deliveries, and planning around supply. There is also the space required to store full bottles and the effort needed to manage empty ones.
-
-Plastic waste is another visible consequence. Even where recycling exists, collection and processing are not always consistent, which means a daily necessity can create a steady stream of material with a very short useful life.
-
-A home purification system changes the pattern from repeated purchasing to planned ownership. Filters and service still have a cost, but they are predictable and connected to a system designed for long-term use.
-
-The right comparison is not one bottle against one glass. It is the total experience of supplying a household with water every day for years.`,
-		category: 'Smart Living',
-		status: 'published',
-		publishedAt: new Date('2026-04-20T09:00:00.000Z'),
-		featuredAt: new Date('2026-04-20T09:00:00.000Z'),
-	},
-	{
-		title: 'Hosting Well Starts Before Your Guests Arrive',
-		slug: 'hosting-well-starts-before-your-guests-arrive',
-		excerpt:
-			'Thoughtful hosting is not performance. It is the quiet preparation that lets everyone, including the host, feel at ease.',
-		content: `The most memorable homes are not always the most formal. They are the ones where guests understand instinctively that they can settle in.
-
-Prepare drinks before attention is divided. Chilled water, clean glasses, and a simple option such as citrus or herbs create an easy welcome without requiring constant service.
-
-Let the room do some of the work. Clear a place for personal items, soften the lighting, and keep the path between seating, food, and water unobstructed.
-
-Choose a menu that allows you to remain present. One dependable main dish and a few well-made accompaniments often feel more generous than an elaborate meal that keeps the host away from the table.
-
-Good hosting is a form of care expressed through preparation. When the essentials are handled in advance, conversation has room to become the centre of the evening.`,
-		category: 'Home & Hospitality',
-		status: 'published',
-		publishedAt: new Date('2026-04-12T09:00:00.000Z'),
-		featuredAt: new Date('2026-04-12T09:00:00.000Z'),
-	},
-	{
-		title: 'When Should You Replace a Water Filter?',
-		slug: 'when-should-you-replace-a-water-filter',
-		excerpt:
-			'Time is a useful guide, but water quality, household usage, and changes in performance also tell you when a filter needs attention.',
-		content: `Filter replacement intervals are designed to make maintenance predictable, but they are not the only signal worth noticing.
-
-A change in taste or odour can indicate that a filter is approaching the end of its effective life. Reduced flow may also suggest that sediment has accumulated, particularly where the incoming water carries more particles.
-
-Household demand matters. A system serving a busy family processes more water than one used by a single person, so usage can bring replacement forward even when the calendar date has not arrived.
-
-Do not wait for a dramatic change. Regular service protects water quality and reduces strain on the system. Keeping a simple maintenance record makes it easier to plan replacements before they become urgent.
-
-If you are uncertain, speak with the service team and share what you have observed. Good maintenance advice considers the system, the water source, and the way your household actually uses water.`,
-		category: 'Care & Maintenance',
-		status: 'published',
-		publishedAt: new Date('2026-04-04T09:00:00.000Z'),
-		featuredAt: new Date('2026-04-04T09:00:00.000Z'),
+The best catalogue reduces uncertainty. When an organizer understands what you do and how to book it, you become easier to choose.`,
 	},
 ];
 
 export async function seedBlogs(dataSource: DataSource) {
 	const blogs = dataSource.getRepository(BlogEntity);
-	const users = dataSource.getRepository(UserEntity);
-	const products = dataSource.getRepository(ProductEntity);
-	const author = await users.findOne({ where: { role: Role.WRITER } });
-
-	if (!author) {
-		throw new Error('Writer user must be seeded before blogs');
-	}
-
-	const relatedProducts = await products.find({
-		where: { status: 'active' },
-		order: { sortOrder: 'ASC', createdAt: 'DESC' },
-		take: 3,
-	});
+	const author = await ensureBlogAuthor(dataSource);
 
 	for (const seed of blogSeeds) {
-		const existing = await blogs.findOne({
-			where: { slug: seed.slug },
-			relations: ['relatedProducts'],
-		});
-		const readTimeMinutes = calculateReadTime(seed.content);
-		const values = {
-			...seed,
-			author,
-			authorId: author.id,
-			readTimeMinutes,
-			relatedProducts,
-		};
+		const existing = await blogs.findOne({ where: { slug: seed.slug } });
+		if (existing) {
+			console.log(`Skipped existing blog: ${seed.slug}`);
+			continue;
+		}
 
-		await blogs.save(existing ? blogs.merge(existing, values) : blogs.create(values));
+		await blogs.save(
+			blogs.create({
+				...seed,
+				status: 'published',
+				author,
+				authorId: author.id,
+				readTimeMinutes: calculateReadTime(seed.content),
+				relatedProducts: [],
+			}),
+		);
+		console.log(`Created blog: ${seed.slug}`);
 	}
+}
+
+async function ensureBlogAuthor(dataSource: DataSource) {
+	const users = dataSource.getRepository(UserEntity);
+	const email = 'editorial@venuespice.com';
+	const existing = await users.findOne({ where: { email } });
+	const now = new Date();
+
+	if (existing) {
+		if (existing.role !== Role.WRITER || !existing.verifiedAt || !existing.isActive) {
+			existing.role = Role.WRITER;
+			existing.isActive = true;
+			existing.verifiedAt = existing.verifiedAt || now;
+			existing.activeAt = existing.activeAt || now;
+			await users.save(existing);
+		}
+		return existing;
+	}
+
+	return users.save(
+		users.create({
+			fullName: 'Venue Spice Editorial',
+			email,
+			passwordHash: await bcrypt.hash('password123*', 10),
+			role: Role.WRITER,
+			isActive: true,
+			verifiedAt: now,
+			activeAt: now,
+		}),
+	);
 }
 
 function calculateReadTime(content: string) {

@@ -43,6 +43,14 @@ else
   echo "[predeploy] Vendor category seed finished"
 fi
 
+if [ "${SEED_BLOGS_ON_DEPLOY:-true}" = "false" ]; then
+  echo "[predeploy] Skipping blog seed because SEED_BLOGS_ON_DEPLOY=false"
+else
+  echo "[predeploy] Seeding blogs"
+  npm run seed:blogs
+  echo "[predeploy] Blog seed finished"
+fi
+
 if [ "${SYNC_SUPER_ADMINS_ON_DEPLOY:-true}" = "false" ]; then
   echo "[predeploy] Skipping super admin sync because SYNC_SUPER_ADMINS_ON_DEPLOY=false"
   exit 0
