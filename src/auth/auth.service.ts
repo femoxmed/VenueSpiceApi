@@ -62,6 +62,25 @@ export class AuthService {
 			throw new UnauthorizedException('Invalid email or password');
 		}
 
+		if (!user.verifiedAt) {
+			const code = this.generateVerificationCode();
+			user.emailVerificationCodeHash = await bcrypt.hash(code, 10);
+			user.emailVerificationExpiresAt = this.getVerificationExpiry();
+			await this.usersRepository.save(user);
+
+			await this.queueAuthEmail(
+				user.email,
+				'Verify your Venue Spice account',
+				this.buildVerificationEmail(user.fullName, code),
+			);
+
+			return {
+				requiresEmailVerification: true,
+				email: user.email,
+				message: 'Please verify your account. A new verification code has been sent to your email.',
+			};
+		}
+
 		if (this.requiresAdminOtp(user.role)) {
 			const code = this.generateVerificationCode();
 			console.log(`[TEMP ADMIN OTP] ${user.email}: ${code}`);
