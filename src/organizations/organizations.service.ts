@@ -222,21 +222,26 @@ export class OrganizationsService {
 		}
 
 		if (!organization.stripeAccountId) {
-			const account = await this.createStripeExpressAccount(organization, secretKey);
-			organization.stripeAccountId = account.id;
-			organization.stripeAccountType = 'express';
-			organization.stripeChargesEnabled = false;
-			organization.stripePayoutsEnabled = false;
-			organization.stripeDetailsSubmitted = false;
-			organization.stripeOnboardingCompletedAt = null;
-			await this.organizationsRepository.save(organization);
+			await this.createAndAttachStripeExpressAccount(organization, secretKey);
+		} else {
+			const accountExists = await this.stripeAccountBelongsToCurrentPlatform(
+				organization.stripeAccountId,
+				secretKey,
+			);
+			if (!accountExists) {
+				await this.createAndAttachStripeExpressAccount(organization, secretKey);
+			}
 		}
 
 		const appUrl = this.configService.get<string>('WEB_APP_URL', 'http://localhost:3000');
 		const redirectUrl = returnUrl || `${appUrl}/dashboard?stripe=return&organizationId=${organization.id}`;
 		const refreshUrl = `${appUrl}/dashboard?stripe=refresh&organizationId=${organization.id}`;
+		const stripeAccountId = organization.stripeAccountId;
+		if (!stripeAccountId) {
+			throw new BadRequestException('Stripe account could not be created');
+		}
 		const accountLink = await this.createStripeAccountLink(
-			organization.stripeAccountId,
+			stripeAccountId,
 			redirectUrl,
 			refreshUrl,
 			secretKey,
@@ -293,7 +298,16 @@ export class OrganizationsService {
 		if (!secretKey || !organization.stripeAccountId || organization.stripeAccountId.startsWith('acct_mock_')) {
 			return organization;
 		}
-		const account = await this.retrieveStripeAccount(organization.stripeAccountId, secretKey);
+		const account = await this.retrieveStripeAccount(organization.stripeAccountId, secretKey).catch(() => null);
+		if (!account) {
+			organization.stripeAccountId = null;
+			organization.stripeAccountType = null;
+			organization.stripeChargesEnabled = false;
+			organization.stripePayoutsEnabled = false;
+			organization.stripeDetailsSubmitted = false;
+			organization.stripeOnboardingCompletedAt = null;
+			return this.organizationsRepository.save(organization);
+		}
 		organization.stripeChargesEnabled = Boolean(account.charges_enabled);
 		organization.stripePayoutsEnabled = Boolean(account.payouts_enabled);
 		organization.stripeDetailsSubmitted = Boolean(account.details_submitted);
@@ -319,6 +333,28 @@ export class OrganizationsService {
 			body: params,
 		});
 		return payload;
+	}
+
+	private async createAndAttachStripeExpressAccount(organization: OrganizationEntity, secretKey: string) {
+		const account = await this.createStripeExpressAccount(organization, secretKey);
+		organization.stripeAccountId = account.id;
+		organization.stripeAccountType = 'express';
+		organization.stripeChargesEnabled = false;
+		organization.stripePayoutsEnabled = false;
+		organization.stripeDetailsSubmitted = false;
+		organization.stripeOnboardingCompletedAt = null;
+		await this.organizationsRepository.save(organization);
+		return organization;
+	}
+
+	private async stripeAccountBelongsToCurrentPlatform(accountId: string, secretKey: string) {
+		if (accountId.startsWith('acct_mock_')) return false;
+		try {
+			await this.retrieveStripeAccount(accountId, secretKey);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	private async createStripeAccountLink(accountId: string, returnUrl: string, refreshUrl: string, secretKey: string) {
