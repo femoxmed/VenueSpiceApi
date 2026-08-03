@@ -57,6 +57,13 @@ export class PaymentsService {
 		private readonly notificationsService: NotificationsService,
 	) {}
 
+	listIntents() {
+		return this.paymentIntentsRepository.find({
+			relations: { invoice: { serviceBooking: true, user: true }, order: true },
+			order: { createdAt: 'DESC' },
+		});
+	}
+
 	async createIntent(dto: CreatePaymentIntentDto, userId?: string) {
 		if (!dto.invoiceId && !dto.orderId) {
 			throw new BadRequestException('Provide invoiceId or orderId');
@@ -154,6 +161,9 @@ export class PaymentsService {
 			status: 'pending',
 			providerReference: this.buildReference(invoice.invoiceNumber),
 			amount: Number(invoice.total ?? 0),
+			subtotal: Number(invoice.subtotal ?? 0),
+			tax: Number(invoice.tax ?? 0),
+			total: Number(invoice.total ?? 0),
 			currency: this.configService.get<string>('PAYMENTS_CURRENCY', 'NGN'),
 			customerEmail,
 			invoice,
@@ -272,6 +282,12 @@ export class PaymentsService {
 	) {
 		intent.providerStatus = providerData.status;
 		intent.providerPayload = providerData as unknown as Record<string, unknown>;
+		if (intent.invoice) {
+			intent.subtotal = Number(intent.invoice.subtotal ?? intent.subtotal ?? 0);
+			intent.tax = Number(intent.invoice.tax ?? intent.tax ?? 0);
+			intent.total = Number(intent.invoice.total ?? intent.amount ?? 0);
+			intent.amount = Number(intent.invoice.total ?? intent.amount ?? 0);
+		}
 
 		if (providerData.status === 'success') {
 			intent.status = 'succeeded';

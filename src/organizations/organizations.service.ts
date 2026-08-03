@@ -230,6 +230,8 @@ export class OrganizationsService {
 			);
 			if (!accountExists) {
 				await this.createAndAttachStripeExpressAccount(organization, secretKey);
+			} else {
+				await this.requestStripeRequiredCapabilities(organization.stripeAccountId, secretKey);
 			}
 		}
 
@@ -308,8 +310,12 @@ export class OrganizationsService {
 			organization.stripeOnboardingCompletedAt = null;
 			return this.organizationsRepository.save(organization);
 		}
+		const canReceiveTransfers =
+			account.capabilities?.transfers === 'active' ||
+			account.capabilities?.legacy_payments === 'active' ||
+			account.capabilities?.crypto_transfers === 'active';
 		organization.stripeChargesEnabled = Boolean(account.charges_enabled);
-		organization.stripePayoutsEnabled = Boolean(account.payouts_enabled);
+		organization.stripePayoutsEnabled = Boolean(account.payouts_enabled && canReceiveTransfers);
 		organization.stripeDetailsSubmitted = Boolean(account.details_submitted);
 		if (organization.stripeChargesEnabled && organization.stripePayoutsEnabled && organization.stripeDetailsSubmitted && !organization.stripeOnboardingCompletedAt) {
 			organization.stripeOnboardingCompletedAt = new Date();
@@ -347,6 +353,16 @@ export class OrganizationsService {
 		return organization;
 	}
 
+	private async requestStripeRequiredCapabilities(accountId: string, secretKey: string) {
+		const params = new URLSearchParams();
+		params.set('capabilities[card_payments][requested]', 'true');
+		params.set('capabilities[transfers][requested]', 'true');
+		await this.stripeRequest(`/v1/accounts/${encodeURIComponent(accountId)}`, secretKey, {
+			method: 'POST',
+			body: params,
+		});
+	}
+
 	private async stripeAccountBelongsToCurrentPlatform(accountId: string, secretKey: string) {
 		if (accountId.startsWith('acct_mock_')) return false;
 		try {
@@ -374,6 +390,12 @@ export class OrganizationsService {
 			charges_enabled?: boolean;
 			payouts_enabled?: boolean;
 			details_submitted?: boolean;
+			capabilities?: {
+				transfers?: string;
+				card_payments?: string;
+				legacy_payments?: string;
+				crypto_transfers?: string;
+			};
 		}>(`/v1/accounts/${encodeURIComponent(accountId)}`, secretKey);
 	}
 

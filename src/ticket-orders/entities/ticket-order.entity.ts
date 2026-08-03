@@ -49,6 +49,33 @@ export class TicketOrderEntity {
 	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
 	tax: number;
 
+	@Column({ name: 'platform_fee', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	platformFee: number;
+
+	@Column({ name: 'processing_fee', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	processingFee: number;
+
+	@Column({ name: 'organizer_net', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	organizerNet: number;
+
+	@Column({ name: 'fee_payer', type: 'varchar', default: 'buyer' })
+	feePayer: 'buyer' | 'organizer' | 'mixed';
+
+	@Column({ name: 'platform_fee_percent', type: 'decimal', precision: 8, scale: 5, default: 0 })
+	platformFeePercent: number;
+
+	@Column({ name: 'platform_fee_fixed', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	platformFeeFixed: number;
+
+	@Column({ name: 'processing_fee_percent', type: 'decimal', precision: 8, scale: 5, default: 0 })
+	processingFeePercent: number;
+
+	@Column({ name: 'processing_fee_fixed', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	processingFeeFixed: number;
+
+	@Column({ name: 'fee_snapshot', type: 'jsonb', nullable: true })
+	feeSnapshot?: Record<string, unknown> | null;
+
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	total: number;
 

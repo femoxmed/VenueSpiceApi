@@ -16,8 +16,10 @@ import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
-import { CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
+import { PreviewCheckoutFeesDto } from './dto/preview-checkout-fees.dto';
 import { IssuedTicketEntity } from './entities/issued-ticket.entity';
 import { TicketOrderItemEntity } from './entities/ticket-order-item.entity';
 import { TicketOrderEntity } from './entities/ticket-order.entity';
@@ -27,9 +29,40 @@ type StripeCheckoutSession = {
 	url?: string;
 	payment_intent?: string;
 	amount_total?: number;
+	amount_subtotal?: number;
 	currency?: string;
 	payment_status?: string;
 	metadata?: Record<string, string>;
+	total_details?: {
+		amount_discount?: number;
+		amount_shipping?: number;
+		amount_tax?: number;
+	};
+};
+
+type StripeConnectedAccount = {
+	id: string;
+	charges_enabled?: boolean;
+	payouts_enabled?: boolean;
+	details_submitted?: boolean;
+	capabilities?: {
+		transfers?: string;
+		card_payments?: string;
+		legacy_payments?: string;
+		crypto_transfers?: string;
+	};
+	error?: {
+		message?: string;
+	};
+};
+
+type PreparedCheckoutItem = {
+	ticketType: TicketTypeEntity;
+	ticketName: string;
+	quantity: number;
+	unitPrice: number;
+	lineTotal: number;
+	feePayer: 'buyer' | 'organizer';
 };
 
 @Injectable()
@@ -59,6 +92,7 @@ export class TicketOrdersService {
 		private readonly usersRepository: Repository<UserEntity>,
 		private readonly configService: ConfigService,
 		private readonly notificationsService: NotificationsService,
+		private readonly platformSettingsService: PlatformSettingsService,
 	) {}
 
 	findAll() {
@@ -124,56 +158,20 @@ export class TicketOrdersService {
 	}
 
 	async createCheckoutSession(dto: CreateCheckoutSessionDto) {
-		const event = await this.eventsRepository.findOne({
-			where: { id: dto.eventId },
-		});
-		if (!event || event.status !== 'published') {
-			throw new BadRequestException('Published event not found');
-		}
-
-		const ticketTypeIds = dto.items.map((item) => item.ticketTypeId);
-		const ticketTypes = await this.ticketTypesRepository.find({
-			where: { id: In(ticketTypeIds) },
-			relations: { event: true },
-		});
-
-		if (ticketTypes.length !== ticketTypeIds.length) {
-			throw new BadRequestException('One or more ticket types are invalid');
-		}
-
-		const referralCode = dto.referralCode
-			? await this.referralCodesRepository.findOne({
-					where: { code: dto.referralCode },
-			  })
-			: null;
-		if (dto.referralCode) {
-			await this.ensureDiscountCouponCanBeUsed(dto.referralCode, event);
-		}
-
-		const items = dto.items.map((item) => {
-			const ticketType = ticketTypes.find((ticket) => ticket.id === item.ticketTypeId);
-			if (!ticketType || ticketType.event.id !== event.id) {
-				throw new BadRequestException('Ticket type does not belong to this event');
-			}
-			if (ticketType.status !== 'active') {
-				throw new BadRequestException(`${ticketType.name} is not available`);
-			}
-			const remaining = ticketType.quantity - ticketType.quantitySold;
-			if (item.quantity > remaining) {
-				throw new BadRequestException(`${ticketType.name} only has ${remaining} remaining`);
-			}
-			const unitPrice = Number(ticketType.price);
-			return this.ticketOrderItemsRepository.create({
-				ticketType,
-				ticketName: ticketType.name,
+		const { event, referralCode, items: preparedItems } = await this.prepareCheckout(dto);
+		const items = preparedItems.map((item) =>
+			this.ticketOrderItemsRepository.create({
+				ticketType: item.ticketType,
+				ticketName: item.ticketName,
 				quantity: item.quantity,
-				unitPrice,
-				lineTotal: unitPrice * item.quantity,
-			});
-		});
+				unitPrice: item.unitPrice,
+				lineTotal: item.lineTotal,
+			}),
+		);
 
-		const subtotal = items.reduce((sum, item) => sum + Number(item.lineTotal), 0);
+		const subtotal = this.roundMoney(preparedItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
 		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
+		const feeEstimate = await this.calculateCheckoutFees(preparedItems);
 		const order = await this.ticketOrdersRepository.save(
 			this.ticketOrdersRepository.create({
 				event,
@@ -185,7 +183,16 @@ export class TicketOrdersService {
 				status: 'pending',
 				subtotal,
 				tax: 0,
-				total: subtotal,
+				platformFee: feeEstimate.platformFee,
+				processingFee: feeEstimate.processingFee,
+				organizerNet: feeEstimate.organizerNet,
+				feePayer: feeEstimate.feePayer,
+				platformFeePercent: feeEstimate.platformFeePercent,
+				platformFeeFixed: feeEstimate.platformFeeFixed,
+				processingFeePercent: feeEstimate.processingFeePercent,
+				processingFeeFixed: feeEstimate.processingFeeFixed,
+				feeSnapshot: feeEstimate,
+				total: feeEstimate.total,
 				currency,
 				items,
 			}),
@@ -204,6 +211,78 @@ export class TicketOrdersService {
 			invoice: demoPayment.invoice,
 			transaction: demoPayment.transaction,
 		};
+	}
+
+	async previewCheckoutFees(dto: PreviewCheckoutFeesDto) {
+		const { event, items } = await this.prepareCheckout(dto);
+		const subtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
+		const feeEstimate = await this.calculateCheckoutFees(items);
+
+		return {
+			eventId: event.id,
+			currency,
+			tax: 0,
+			...feeEstimate,
+		};
+	}
+
+	private async prepareCheckout(dto: {
+		eventId: string;
+		referralCode?: string;
+		items: CheckoutTicketItemDto[];
+	}) {
+		const event = await this.eventsRepository.findOne({
+			where: { id: dto.eventId },
+		});
+		if (!event || event.status !== 'published') {
+			throw new BadRequestException('Published event not found');
+		}
+
+		const ticketTypeIds = dto.items.map((item) => item.ticketTypeId);
+		const uniqueTicketTypeIds = Array.from(new Set(ticketTypeIds));
+		const ticketTypes = await this.ticketTypesRepository.find({
+			where: { id: In(uniqueTicketTypeIds) },
+			relations: { event: true },
+		});
+
+		if (ticketTypes.length !== uniqueTicketTypeIds.length) {
+			throw new BadRequestException('One or more ticket types are invalid');
+		}
+
+		const referralCode = dto.referralCode
+			? await this.referralCodesRepository.findOne({
+					where: { code: dto.referralCode },
+			  })
+			: null;
+		if (dto.referralCode) {
+			await this.ensureDiscountCouponCanBeUsed(dto.referralCode, event);
+		}
+
+		const items: PreparedCheckoutItem[] = dto.items.map((item) => {
+			const ticketType = ticketTypes.find((ticket) => ticket.id === item.ticketTypeId);
+			if (!ticketType || ticketType.event.id !== event.id) {
+				throw new BadRequestException('Ticket type does not belong to this event');
+			}
+			if (ticketType.status !== 'active') {
+				throw new BadRequestException(`${ticketType.name} is not available`);
+			}
+			const remaining = ticketType.quantity - ticketType.quantitySold;
+			if (item.quantity > remaining) {
+				throw new BadRequestException(`${ticketType.name} only has ${remaining} remaining`);
+			}
+			const unitPrice = Number(ticketType.price);
+			return {
+				ticketType,
+				ticketName: ticketType.name,
+				quantity: item.quantity,
+				unitPrice,
+				lineTotal: unitPrice * item.quantity,
+				feePayer: ticketType.includeCharges ? 'organizer' : 'buyer',
+			};
+		});
+
+		return { event, referralCode, items };
 	}
 
 	async completeDemoPayment(orderId: string) {
@@ -290,6 +369,7 @@ export class TicketOrdersService {
 		order.stripePaymentIntentId = session.payment_intent ?? order.stripePaymentIntentId;
 		order.paidAt = new Date();
 		order.providerPayload = session as unknown as Record<string, unknown>;
+		this.applyStripeTotals(order, session);
 
 		for (const item of order.items) {
 			item.ticketType.quantitySold += item.quantity;
@@ -328,16 +408,18 @@ export class TicketOrdersService {
 		}
 
 		const params = new URLSearchParams();
+		const settings = await this.platformSettingsService.getPricingSettings();
 		params.set('mode', 'payment');
 		params.set('success_url', `${appUrl}/events/${order.event.slug}/payment/success?order=${order.id}&session_id={CHECKOUT_SESSION_ID}`);
 		params.set('cancel_url', `${appUrl}/events/${order.event.slug}/purchase?checkout=cancelled`);
 		params.set('customer_email', order.customerEmail);
 		params.set('billing_address_collection', 'required');
-		params.set('automatic_tax[enabled]', 'true');
+		params.set('automatic_tax[enabled]', settings.stripeAutomaticTaxEnabled ? 'true' : 'false');
 		params.set('metadata[ticketOrderId]', order.id);
 		params.set('metadata[eventId]', order.event.id);
 		params.set('metadata[organizationId]', order.organization.id);
 		if (order.organization.stripeAccountId && Number(order.total ?? 0) > 0) {
+			await this.ensureDestinationAccountCanReceiveTransfers(order.organization.stripeAccountId, secretKey);
 			params.set(
 				'payment_intent_data[application_fee_amount]',
 				String(this.calculateApplicationFeeAmount(order)),
@@ -348,16 +430,33 @@ export class TicketOrdersService {
 		order.items.forEach((item, index) => {
 			params.set(`line_items[${index}][quantity]`, String(item.quantity));
 			params.set(`line_items[${index}][price_data][currency]`, order.currency.toLowerCase());
+			this.appendStripeTaxSettings(params, `line_items[${index}][price_data]`, settings);
 			params.set(
 				`line_items[${index}][price_data][unit_amount]`,
 				String(Math.round(Number(item.unitPrice) * 100)),
 			);
 			params.set(`line_items[${index}][price_data][product_data][name]`, item.ticketName);
+			if (settings.stripeTaxCode.trim()) {
+				params.set(
+					`line_items[${index}][price_data][product_data][tax_code]`,
+					settings.stripeTaxCode.trim(),
+				);
+			}
 			params.set(
 				`line_items[${index}][price_data][product_data][description]`,
 				order.event.title,
 			);
 		});
+		let lineItemIndex = order.items.length;
+		const buyerPlatformFee = this.feeSnapshotNumber(order, 'buyerPlatformFee', order.feePayer === 'buyer' ? Number(order.platformFee ?? 0) : 0);
+		const buyerProcessingFee = this.feeSnapshotNumber(order, 'buyerProcessingFee', order.feePayer === 'buyer' ? Number(order.processingFee ?? 0) : 0);
+		if (buyerPlatformFee > 0) {
+			this.appendStripeLineItem(params, lineItemIndex, order.currency, 'Venue Spice service fee', buyerPlatformFee, settings);
+			lineItemIndex += 1;
+		}
+		if (buyerProcessingFee > 0) {
+			this.appendStripeLineItem(params, lineItemIndex, order.currency, 'Payment processing fee', buyerProcessingFee, settings);
+		}
 
 		const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
 			method: 'POST',
@@ -374,17 +473,150 @@ export class TicketOrdersService {
 		return payload;
 	}
 
+	private async ensureDestinationAccountCanReceiveTransfers(accountId: string, secretKey: string) {
+		if (accountId.startsWith('acct_mock_')) {
+			throw new BadRequestException('Reconnect Stripe payouts before accepting paid orders.');
+		}
+
+		const response = await fetch(`https://api.stripe.com/v1/accounts/${encodeURIComponent(accountId)}`, {
+			headers: {
+				Authorization: `Bearer ${secretKey}`,
+			},
+		});
+		const account = (await response.json()) as StripeConnectedAccount;
+		if (!response.ok) {
+			throw new BadRequestException(account.error?.message ?? 'Stripe payout account could not be verified.');
+		}
+
+		const canReceiveTransfers =
+			account.capabilities?.transfers === 'active' ||
+			account.capabilities?.legacy_payments === 'active' ||
+			account.capabilities?.crypto_transfers === 'active';
+
+		if (!canReceiveTransfers) {
+			throw new BadRequestException(
+				'This event organizer needs to finish or reconnect Stripe payout setup before paid orders can be accepted.',
+			);
+		}
+	}
+
 	private calculateApplicationFeeAmount(order: TicketOrderEntity) {
-		const percent = Number(
-			this.configService.get<string>('VENUE_SPICE_FEE_PERCENT')
-				?? this.configService.get<string>('EVENTBOX_FEE_PERCENT', '0.05'),
+		return Math.max(
+			0,
+			Math.round((Number(order.platformFee ?? 0) + this.feeSnapshotNumber(order, 'organizerProcessingFee', 0)) * 100),
 		);
-		const fixed = Number(
-			this.configService.get<string>('VENUE_SPICE_FEE_FIXED')
-				?? this.configService.get<string>('EVENTBOX_FEE_FIXED', '0'),
+	}
+
+	private async calculateCheckoutFees(items: PreparedCheckoutItem[]) {
+		const settings = await this.platformSettingsService.getPricingSettings();
+		const subtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const ticketCount = items.reduce((sum, item) => sum + item.quantity, 0);
+		const buyerItems = items.filter((item) => item.feePayer === 'buyer');
+		const organizerItems = items.filter((item) => item.feePayer === 'organizer');
+		const buyerSubtotal = this.roundMoney(buyerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const organizerSubtotal = this.roundMoney(organizerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const buyerTicketCount = buyerItems.reduce((sum, item) => sum + item.quantity, 0);
+		const organizerTicketCount = organizerItems.reduce((sum, item) => sum + item.quantity, 0);
+		const feePayer: TicketOrderEntity['feePayer'] = buyerItems.length && organizerItems.length
+			? 'mixed'
+			: organizerItems.length
+				? 'organizer'
+				: settings.defaultFeePayer;
+		const paidSubtotal = subtotal > 0;
+		const buyerPlatformFee = buyerSubtotal > 0
+			? this.roundMoney(buyerSubtotal * settings.venueSpiceFeePercent + settings.venueSpiceFeeFixed * buyerTicketCount)
+			: 0;
+		const organizerPlatformFee = organizerSubtotal > 0
+			? this.roundMoney(organizerSubtotal * settings.venueSpiceFeePercent + settings.venueSpiceFeeFixed * organizerTicketCount)
+			: 0;
+		const buyerProcessingFee = buyerSubtotal > 0
+			? this.roundMoney((buyerSubtotal + buyerPlatformFee) * settings.paymentProcessingFeePercent + settings.paymentProcessingFeeFixed)
+			: 0;
+		const organizerProcessingFee = organizerSubtotal > 0
+			? this.roundMoney(organizerSubtotal * settings.paymentProcessingFeePercent + settings.paymentProcessingFeeFixed)
+			: 0;
+		const platformFee = paidSubtotal ? this.roundMoney(buyerPlatformFee + organizerPlatformFee) : 0;
+		const processingFee = paidSubtotal ? this.roundMoney(buyerProcessingFee + organizerProcessingFee) : 0;
+		const total = this.roundMoney(subtotal + buyerPlatformFee + buyerProcessingFee);
+		const organizerNet = this.roundMoney(subtotal - organizerPlatformFee - organizerProcessingFee);
+		if ((feePayer === 'organizer' || feePayer === 'mixed') && organizerNet < 0) {
+			throw new BadRequestException(
+				'Ticket price is too low for the organizer to absorb fees. Increase the ticket price or pass fees to buyers.',
+			);
+		}
+
+		return {
+			feePayer,
+			ticketCount,
+			subtotal,
+			platformFee,
+			processingFee,
+			organizerNet,
+			total,
+			buyerSubtotal,
+			organizerSubtotal,
+			buyerPlatformFee,
+			organizerPlatformFee,
+			buyerProcessingFee,
+			organizerProcessingFee,
+			platformFeePercent: settings.venueSpiceFeePercent,
+			platformFeeFixed: settings.venueSpiceFeeFixed,
+			processingFeePercent: settings.paymentProcessingFeePercent,
+			processingFeeFixed: settings.paymentProcessingFeeFixed,
+		};
+	}
+
+	private feeSnapshotNumber(order: TicketOrderEntity, key: string, fallback: number) {
+		const value = order.feeSnapshot?.[key];
+		const numeric = Number(value);
+		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	private roundMoney(value: number) {
+		return Math.round((Number(value) || 0) * 100) / 100;
+	}
+
+	private appendStripeLineItem(
+		params: URLSearchParams,
+		index: number,
+		currency: string,
+		name: string,
+		amount: number,
+		settings: Awaited<ReturnType<PlatformSettingsService['getPricingSettings']>>,
+	) {
+		params.set(`line_items[${index}][quantity]`, '1');
+		params.set(`line_items[${index}][price_data][currency]`, currency.toLowerCase());
+		this.appendStripeTaxSettings(params, `line_items[${index}][price_data]`, settings);
+		params.set(
+			`line_items[${index}][price_data][unit_amount]`,
+			String(Math.round(amount * 100)),
 		);
-		const total = Number(order.total ?? 0);
-		return Math.max(0, Math.round((total * percent + fixed) * 100));
+		params.set(`line_items[${index}][price_data][product_data][name]`, name);
+		if (settings.stripeTaxCode.trim()) {
+			params.set(
+				`line_items[${index}][price_data][product_data][tax_code]`,
+				settings.stripeTaxCode.trim(),
+			);
+		}
+	}
+
+	private appendStripeTaxSettings(
+		params: URLSearchParams,
+		priceDataPath: string,
+		settings: Awaited<ReturnType<PlatformSettingsService['getPricingSettings']>>,
+	) {
+		if (settings.stripeTaxBehavior !== 'unspecified') {
+			params.set(`${priceDataPath}[tax_behavior]`, settings.stripeTaxBehavior);
+		}
+	}
+
+	private applyStripeTotals(order: TicketOrderEntity, session: StripeCheckoutSession) {
+		if (typeof session.total_details?.amount_tax === 'number') {
+			order.tax = this.roundMoney(session.total_details.amount_tax / 100);
+		}
+		if (typeof session.amount_total === 'number') {
+			order.total = this.roundMoney(session.amount_total / 100);
+		}
 	}
 
 	private async ensureDiscountCouponCanBeUsed(code: string, event: EventEntity) {
@@ -437,14 +669,28 @@ export class TicketOrdersService {
 
 	private async markInvoiceAndTransactionPaid(order: TicketOrderEntity, session: StripeCheckoutSession) {
 		const payment = await this.createDemoInvoiceAndTransaction(order);
+		const stripeTax = typeof session.total_details?.amount_tax === 'number'
+			? this.roundMoney(session.total_details.amount_tax / 100)
+			: Number(payment.invoice.tax ?? 0);
+		const stripeTotal = typeof session.amount_total === 'number'
+			? this.roundMoney(session.amount_total / 100)
+			: Number(payment.invoice.total ?? order.total ?? 0);
+		payment.invoice.tax = stripeTax;
+		payment.invoice.total = stripeTotal;
 		if (payment.invoice.status !== 'paid') {
 			payment.invoice.status = 'paid';
-			await this.invoicesRepository.save(payment.invoice);
 		}
+		await this.invoicesRepository.save(payment.invoice);
 		payment.transaction.status = 'succeeded';
 		payment.transaction.provider = 'stripe';
 		payment.transaction.providerStatus = session.payment_status ?? 'paid';
 		payment.transaction.providerReference = session.payment_intent ?? session.id;
+		payment.transaction.amount = stripeTotal;
+		payment.transaction.subtotal = Number(order.subtotal ?? 0);
+		payment.transaction.tax = stripeTax;
+		payment.transaction.platformFee = Number(order.platformFee ?? 0);
+		payment.transaction.processingFee = Number(order.processingFee ?? 0);
+		payment.transaction.total = stripeTotal;
 		payment.transaction.paidAt = new Date();
 		payment.transaction.providerPayload = session as unknown as Record<string, unknown>;
 		await this.paymentIntentsRepository.save(payment.transaction);
@@ -495,6 +741,11 @@ export class TicketOrdersService {
 				providerStatus: 'requires_payment_method',
 				providerReference: `txn_${randomBytes(8).toString('hex')}`,
 				amount: Number(order.total ?? 0),
+				subtotal: Number(order.subtotal ?? 0),
+				tax: Number(order.tax ?? 0),
+				platformFee: Number(order.platformFee ?? 0),
+				processingFee: Number(order.processingFee ?? 0),
+				total: Number(order.total ?? 0),
 				currency: order.currency,
 				customerEmail: order.customerEmail,
 				invoice,

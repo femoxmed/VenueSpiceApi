@@ -30,6 +30,7 @@ import { NewsletterModule } from './newsletter/newsletter.module';
 import { VendorCategoriesModule } from './vendor-categories/vendor-categories.module';
 import { VendorCatalogueModule } from './vendor-catalogue/vendor-catalogue.module';
 import { RefundsModule } from './refunds/refunds.module';
+import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
 import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
 import { EventEntity } from './events/entities/event.entity';
@@ -62,6 +63,7 @@ import { Upload } from './uploads/entities/upload.entity';
 import { VendorCategoryEntity } from './vendor-categories/entities/vendor-category.entity';
 import { VendorCatalogueItemEntity } from './vendor-catalogue/entities/vendor-catalogue-item.entity';
 import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
+import { PlatformSettingEntity } from './platform-settings/entities/platform-setting.entity';
 import { DatabaseModule } from './database/database.module';
 
 function isEnabled(value?: string | boolean | number | null) {
@@ -138,6 +140,7 @@ function getBullQueuePrefix(value?: string | null) {
 					VendorCategoryEntity,
 					VendorCatalogueItemEntity,
 					RefundRequestEntity,
+					PlatformSettingEntity,
 				],
 			}),
 		}),
@@ -195,6 +198,7 @@ function getBullQueuePrefix(value?: string | null) {
 			VendorCategoriesModule,
 			VendorCatalogueModule,
 			RefundsModule,
+			PlatformSettingsModule,
 		],
 	})
 export class AppModule {}

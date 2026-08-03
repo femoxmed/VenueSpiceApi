@@ -6,6 +6,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
+import { PreviewCheckoutFeesDto } from './dto/preview-checkout-fees.dto';
 import { TicketOrdersService } from './ticket-orders.service';
 
 @ApiTags('Ticket Orders')
@@ -16,6 +17,11 @@ export class TicketOrdersController {
 	@Post('checkout')
 	createCheckoutSession(@Body() dto: CreateCheckoutSessionDto) {
 		return this.ticketOrdersService.createCheckoutSession(dto);
+	}
+
+	@Post('fee-preview')
+	previewCheckoutFees(@Body() dto: PreviewCheckoutFeesDto) {
+		return this.ticketOrdersService.previewCheckoutFees(dto);
 	}
 
 	@Post('find-my-ticket')

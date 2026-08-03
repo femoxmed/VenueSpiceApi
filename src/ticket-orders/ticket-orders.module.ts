@@ -9,6 +9,7 @@ import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { IssuedTicketEntity } from './entities/issued-ticket.entity';
 import { TicketOrderItemEntity } from './entities/ticket-order-item.entity';
 import { TicketOrderEntity } from './entities/ticket-order.entity';
@@ -18,6 +19,7 @@ import { TicketOrdersService } from './ticket-orders.service';
 @Module({
 	imports: [
 		NotificationsModule,
+		PlatformSettingsModule,
 		TypeOrmModule.forFeature([
 			TicketOrderEntity,
 			TicketOrderItemEntity,

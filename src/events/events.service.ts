@@ -61,7 +61,8 @@ export class EventsService {
 			)
 			.orderBy('event.startsAt', 'ASC')
 			.take(24)
-			.getMany();
+			.getMany()
+			.then((events) => events.map((event) => this.toPublicEvent(event)));
 	}
 
 	async findPublicOne(idOrSlug: string) {
@@ -75,7 +76,7 @@ export class EventsService {
 			where,
 		});
 		if (!event) throw new NotFoundException('Published event not found');
-		return event;
+		return this.toPublicEvent(event);
 	}
 
 	async findOne(idOrSlug: string, user?: { id: string; role: Role }) {
@@ -162,6 +163,7 @@ export class EventsService {
 					description: ticket.description ?? undefined,
 					includeCharges: ticket.includeCharges,
 				})),
+				addOns: dto.addOns ?? event.addOns,
 			},
 			event.organization,
 		);
@@ -326,6 +328,23 @@ export class EventsService {
 
 	private isExpired(value: Date) {
 		return value.getTime() < Date.now();
+	}
+
+	private toPublicEvent(event: EventEntity) {
+		const organization = event.organization;
+		return {
+			...event,
+			organization: organization ? {
+				id: organization.id,
+				name: organization.name,
+				slug: organization.slug,
+			} : undefined,
+			organizerPayoutReady: Boolean(
+				organization?.stripeChargesEnabled &&
+				organization?.stripePayoutsEnabled &&
+				organization?.stripeDetailsSubmitted,
+			),
+		};
 	}
 
 	private slugify(value: string) {

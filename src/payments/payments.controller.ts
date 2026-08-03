@@ -16,6 +16,14 @@ export class PaymentsController {
   @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(Role.SUPER_ADMIN, Role.ADMIN)
+  @Get('intents')
+  listIntents() {
+    return this.paymentsService.listIntents();
+  }
+
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.SUPER_ADMIN, Role.ADMIN)
   @Post('intents')
   createIntent(@Body() dto: CreatePaymentIntentDto) {
     return this.paymentsService.createIntent(dto);

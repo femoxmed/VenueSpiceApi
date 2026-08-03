@@ -38,6 +38,21 @@ export class PaymentIntentEntity {
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount: number;
 
+	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+	subtotal: number;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+	tax: number;
+
+	@Column({ name: 'platform_fee', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	platformFee: number;
+
+	@Column({ name: 'processing_fee', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	processingFee: number;
+
+	@Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+	total: number;
+
 	@Column({ default: 'NGN' })
 	currency: string;
 
