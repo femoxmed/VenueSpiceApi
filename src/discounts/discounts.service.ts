@@ -12,6 +12,7 @@ import { DiscountCouponEntity } from './entities/discount-coupon.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { ConfigService } from '@nestjs/config';
 import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 
 @Injectable()
 export class DiscountsService {
@@ -31,6 +32,7 @@ export class DiscountsService {
 		@InjectRepository(ReferralCodeEntity)
 		private readonly referralCodesRepository: Repository<ReferralCodeEntity>,
 		private readonly configService: ConfigService,
+		private readonly notificationsService: NotificationsService,
 	) {}
 
 	async findAll(organizationId?: string, user?: { id: string; role: Role }) {
@@ -81,11 +83,8 @@ export class DiscountsService {
 		const status = this.isInfluencerReadyForApproval(agent)
 			? 'pending_influencer_approval'
 			: 'pending_influencer_signup';
-		if (status === 'pending_influencer_approval') {
-			console.log(`[TEMP INFLUENCER APPROVAL] ${agent.email} needs to approve coupon ${code}`);
-		}
 
-		return this.couponsRepository.save(
+		const coupon = await this.couponsRepository.save(
 			this.couponsRepository.create({
 				organization,
 				event,
@@ -100,6 +99,8 @@ export class DiscountsService {
 				status,
 			}),
 		);
+		await this.sendInfluencerCampaignInvitation(coupon);
+		return coupon;
 	}
 
 	async findInfluencerCampaigns(user: { id: string; role: Role }) {
@@ -359,9 +360,6 @@ export class DiscountsService {
 			throw new BadRequestException('Influencer name is required when inviting a new influencer');
 		}
 
-		// TODO: send an influencer registration email when the mailer/invite flow is finalized.
-		console.log(`[TEMP INFLUENCER INVITE] ${normalizedEmail} invited to register as a Venue Spice influencer`);
-
 		return this.agentsRepository.save(
 			this.agentsRepository.create({
 				organization,
@@ -378,6 +376,62 @@ export class DiscountsService {
 
 	private isInfluencerReadyForApproval(agent: AgentEntity) {
 		return Boolean(agent.user && agent.user.isActive && agent.status === 'active');
+	}
+
+	private async sendInfluencerCampaignInvitation(coupon: DiscountCouponEntity) {
+		const event = coupon.event;
+		const agent = coupon.agent;
+		if (!agent?.email) return;
+
+		const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:3000');
+		const loginUrl = this.joinUrl(frontendUrl, '/login');
+		const signupUrl = this.joinUrl(frontendUrl, '/signup');
+		const campaignUrl = this.joinUrl(frontendUrl, '/influencer/coupons');
+		const eventUrl = event?.slug ? this.joinUrl(frontendUrl, `/events/${event.slug}`) : campaignUrl;
+		const organizationName = coupon.organization?.name || agent.organization?.name || 'Venue Spice organizer';
+		const location = event?.isVirtual
+			? 'Virtual event'
+			: [event?.venue, event?.city, event?.state, event?.country].filter(Boolean).join(', ') ||
+				'Venue to be announced';
+		const title = event?.title || 'a Venue Spice event';
+		const actionLabel = coupon.status === 'pending_influencer_signup'
+			? 'Create influencer account'
+			: 'Review campaign';
+
+		await this.notificationsService.queueEmail(
+			agent.email,
+			`You have been invited to promote ${title}`,
+			this.notificationsService.buildBrandedEmail({
+				eyebrow: 'Influencer campaign invite',
+				title: 'You have been added to an event campaign',
+				greeting: `Hello ${agent.fullName},`,
+				intro: `${organizationName} invited you to promote ${title}. Sign in or create an influencer account to review the campaign, accept it, and share your code.`,
+				rows: [
+					{ label: 'Event', value: title },
+					{ label: 'Organizer', value: organizationName },
+					...(event?.startsAt ? [{ label: 'Starts', value: event.startsAt }] : []),
+					{ label: 'Location', value: location },
+					{ label: 'Coupon code', value: coupon.code },
+					{ label: 'Coupon value', value: this.formatCouponValue(coupon) },
+					{ label: 'Influencer commission', value: `${Number(coupon.influencerCommissionPercent || 0)}%` },
+				],
+				action: {
+					label: actionLabel,
+					url: coupon.status === 'pending_influencer_signup' ? signupUrl : campaignUrl,
+				},
+				secondaryAction: { label: 'Sign in', url: loginUrl },
+				note: `You can preview the event here: <a href="${eventUrl}">${eventUrl}</a>`,
+			}),
+		);
+	}
+
+	private formatCouponValue(coupon: DiscountCouponEntity) {
+		if (coupon.type === 'percentage') return `${Number(coupon.value || 0)}% off`;
+		return `USD ${Number(coupon.value || 0).toFixed(2)} off`;
+	}
+
+	private joinUrl(base: string, path: string) {
+		return `${base.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
 	}
 
 	private async ensureInfluencerCanDecide(coupon: DiscountCouponEntity, userId: string) {

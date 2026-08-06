@@ -1,8 +1,10 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
 import { EventEntity } from '../events/entities/event.entity';
 import { Role } from '../common/enums/role.enum';
+import { NotificationsService } from '../notifications/notifications.service';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { CreateAgentDto } from './dto/create-agent.dto';
@@ -22,6 +24,8 @@ export class AgentsService {
 		private readonly eventsRepository: Repository<EventEntity>,
 		@InjectRepository(TicketOrderEntity)
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
+		private readonly notificationsService: NotificationsService,
+		private readonly configService: ConfigService,
 	) {}
 
 	async findAll(organizationId?: string, user?: { id: string; role: Role }) {
@@ -147,9 +151,49 @@ export class AgentsService {
 		const existing = await this.referralCodesRepository.findOne({ where: { code } });
 		if (existing) throw new BadRequestException('Could not generate unique referral code');
 
-		return this.referralCodesRepository.save(
+		const referralCode = await this.referralCodesRepository.save(
 			this.referralCodesRepository.create({ agent, event, code }),
 		);
+		if (event) {
+			await this.sendInfluencerEventInvitation(agent, event, referralCode.code);
+		}
+		return referralCode;
+	}
+
+	private async sendInfluencerEventInvitation(agent: AgentEntity, event: EventEntity, code: string) {
+		const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:3000');
+		const loginUrl = this.joinUrl(frontendUrl, '/login');
+		const signupUrl = this.joinUrl(frontendUrl, '/signup');
+		const eventUrl = event.slug ? this.joinUrl(frontendUrl, `/events/${event.slug}`) : frontendUrl;
+		const organizationName = event.organization?.name || agent.organization?.name || 'Venue Spice organizer';
+		const location = event.isVirtual
+			? 'Virtual event'
+			: [event.venue, event.city, event.state, event.country].filter(Boolean).join(', ') || 'Venue to be announced';
+
+		await this.notificationsService.queueEmail(
+			agent.email,
+			`You have been invited to promote ${event.title}`,
+			this.notificationsService.buildBrandedEmail({
+				eyebrow: 'Influencer campaign invite',
+				title: 'You have been added to an event campaign',
+				greeting: `Hello ${agent.fullName},`,
+				intro: `${organizationName} added you as an influencer for ${event.title}. Sign in or create an influencer account to review the campaign and start sharing your code.`,
+				rows: [
+					{ label: 'Event', value: event.title },
+					{ label: 'Organizer', value: organizationName },
+					{ label: 'Starts', value: event.startsAt },
+					{ label: 'Location', value: location },
+					{ label: 'Referral code', value: code },
+				],
+				action: { label: 'Sign in', url: loginUrl },
+				secondaryAction: { label: 'Create account', url: signupUrl },
+				note: `You can preview the event here: <a href="${eventUrl}">${eventUrl}</a>`,
+			}),
+		);
+	}
+
+	private joinUrl(base: string, path: string) {
+		return `${base.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
 	}
 
 	private buildCode(name: string) {

@@ -1,9 +1,11 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
+import { Request } from 'express';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Role } from '../common/enums/role.enum';
+import { AuditService } from '../audit/audit.service';
 import { CreateEventDto } from './dto/create-event.dto';
 import { EventEntity } from './entities/event.entity';
 import { TicketTypeEntity } from './entities/ticket-type.entity';
@@ -20,6 +22,7 @@ export class EventsService {
 		@InjectRepository(TicketTypeEntity)
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
 		private readonly organizationsService: OrganizationsService,
+		private readonly auditService: AuditService,
 	) {}
 
 	findAll(organizationId?: string, user?: { id: string; role: Role }) {
@@ -51,6 +54,8 @@ export class EventsService {
 		const now = new Date();
 		return this.eventsRepository
 			.createQueryBuilder('event')
+			.leftJoinAndSelect('event.organization', 'organization')
+			.leftJoinAndSelect('event.ticketTypes', 'ticketTypes')
 			.where('event.status = :status', { status: 'published' })
 			.andWhere(
 				new Brackets((builder) => {
@@ -134,9 +139,11 @@ export class EventsService {
 		id: string,
 		dto: Partial<CreateEventDto> & { status?: EventEntity['status'] },
 		user?: { id: string; role: Role },
+		request?: Request,
 	) {
 		this.validatePricing(dto);
 		const event = await this.findOne(id, user);
+		const before = this.pickEventAuditFields(event);
 		if (dto.slug && dto.slug !== event.slug) {
 			const existing = await this.eventsRepository.findOne({ where: { slug: dto.slug } });
 			if (existing) throw new BadRequestException('Event slug already exists');
@@ -182,11 +189,25 @@ export class EventsService {
 			event.ticketTypes = await this.reconcileTicketTypes(event, ticketTypes);
 		}
 
-		return this.eventsRepository.save(event);
+		const saved = await this.eventsRepository.save(event);
+		await this.auditService.log(
+			'event.updated',
+			user,
+			'event',
+			saved.id,
+			this.buildChanges(before, this.pickEventAuditFields(saved)),
+			{
+				organizationId: saved.organization?.id,
+				organizationName: saved.organization?.name,
+				eventTitle: saved.title,
+			},
+			request,
+		);
+		return saved;
 	}
 
-	updateStatus(id: string, status: EventEntity['status'], user?: { id: string; role: Role }) {
-		return this.update(id, { status }, user);
+	updateStatus(id: string, status: EventEntity['status'], user?: { id: string; role: Role }, request?: Request) {
+		return this.update(id, { status }, user, request);
 	}
 
 	private async reconcileTicketTypes(
@@ -249,6 +270,65 @@ export class EventsService {
 			if (!addOn || typeof addOn !== 'object' || !('price' in addOn)) return;
 			this.validatePaidMinimum((addOn as { price?: unknown }).price, `addOns[${index}].price`);
 		});
+	}
+
+	private pickEventAuditFields(event: EventEntity) {
+		return {
+			title: event.title,
+			slug: event.slug,
+			description: event.description,
+			category: event.category,
+			organizerName: event.organizerName,
+			venue: event.venue,
+			country: event.country,
+			state: event.state,
+			city: event.city,
+			streetAddress: event.streetAddress,
+			timezone: event.timezone,
+			isVirtual: event.isVirtual,
+			startsAt: this.toIsoOrNull(event.startsAt),
+			endsAt: this.toIsoOrNull(event.endsAt),
+			coverImageUrl: event.coverImageUrl,
+			imageUrls: this.stableJson(event.imageUrls || []),
+			socialLinks: this.stableJson(event.socialLinks || {}),
+			appearances: this.stableJson(event.appearances || []),
+			addOns: this.stableJson(event.addOns || []),
+			status: event.status,
+			refundCutoffHours: event.refundCutoffHours,
+			ticketTypes: this.stableJson(
+				(event.ticketTypes || []).map((ticket) => ({
+					id: ticket.id,
+					name: ticket.name,
+					price: Number(ticket.price || 0),
+					quantity: Number(ticket.quantity || 0),
+					quantitySold: Number(ticket.quantitySold || 0),
+					limitPerPerson: ticket.limitPerPerson,
+					description: ticket.description,
+					includeCharges: ticket.includeCharges,
+					status: ticket.status,
+				})).sort((first, second) => String(first.id || first.name).localeCompare(String(second.id || second.name))),
+			),
+		};
+	}
+
+	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {
+		const changes: Record<string, { before: unknown; after: unknown }> = {};
+		Object.keys(after).forEach((key) => {
+			if (before[key] !== after[key]) {
+				changes[key] = { before: before[key], after: after[key] };
+			}
+		});
+		return changes;
+	}
+
+	private toIsoOrNull(value?: Date | string | null) {
+		if (!value) return null;
+		const date = value instanceof Date ? value : new Date(value);
+		return Number.isNaN(date.getTime()) ? null : date.toISOString();
+	}
+
+	private stableJson(value: unknown) {
+		return JSON.stringify(value ?? null);
 	}
 
 	private validatePaidMinimum(value: unknown, field: string) {

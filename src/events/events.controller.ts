@@ -58,7 +58,7 @@ export class EventsController {
 		@Body() dto: Partial<CreateEventDto>,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.eventsService.update(id, dto, req.user);
+		return this.eventsService.update(id, dto, req.user, req as any);
 	}
 
 	@ApiBearerAuth()
@@ -70,6 +70,6 @@ export class EventsController {
 		@Body('status') status: 'draft' | 'published' | 'cancelled' | 'archived',
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.eventsService.updateStatus(id, status, req.user);
+		return this.eventsService.updateStatus(id, status, req.user, req as any);
 	}
 }
