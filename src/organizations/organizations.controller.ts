@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
@@ -25,6 +25,16 @@ export class OrganizationsController {
 	@Get('mine')
 	findMine(@Req() req: { user: { id: string } }) {
 		return this.organizationsService.findMine(req.user.id);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard)
+	@Get('username-availability')
+	checkOrganizerUsernameAvailability(
+		@Query('username') username = '',
+		@Query('organizationId') organizationId?: string,
+	) {
+		return this.organizationsService.checkOrganizerUsernameAvailability(username, organizationId);
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)

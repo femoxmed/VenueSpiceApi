@@ -20,6 +20,9 @@ export class OrganizationEntity {
 	@Column({ unique: true })
 	slug: string;
 
+	@Column({ name: 'organizer_username', type: 'varchar', nullable: true, unique: true })
+	organizerUsername?: string | null;
+
 	@Column({ type: 'varchar', default: 'active' })
 	status: 'active' | 'suspended' | 'archived';
 

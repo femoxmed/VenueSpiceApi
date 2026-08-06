@@ -48,6 +48,10 @@ const superAdmins = [
 	},
 ];
 
+const adminCreatedUsersToVerify = [
+	'creative.azeeznosiru@gmail.com',
+];
+
 function isEnabled(value?: string | boolean | number | null) {
 	return ['true', '1', 'yes', 'require', 'required'].includes(
 		String(value ?? '').trim().toLowerCase(),
@@ -141,6 +145,26 @@ async function syncSuperAdmins() {
 			}),
 		);
 		console.log(`Created super admin: ${email}`);
+	}
+
+	for (const emailValue of adminCreatedUsersToVerify) {
+		const email = emailValue.toLowerCase().trim();
+		const existing = await userRepository.findOne({ where: { email } });
+		if (!existing) {
+			console.log(`Admin-created user not found, skipping verification sync: ${email}`);
+			continue;
+		}
+
+		existing.isActive = true;
+		existing.verifiedAt = existing.verifiedAt || now;
+		existing.activeAt = existing.activeAt || now;
+		existing.emailVerificationCodeHash = null;
+		existing.emailVerificationExpiresAt = null;
+		existing.adminOtpCodeHash = null;
+		existing.adminOtpExpiresAt = null;
+
+		await userRepository.save(existing);
+		console.log(`Verified admin-created user: ${email}`);
 	}
 
 	await dataSource.destroy();

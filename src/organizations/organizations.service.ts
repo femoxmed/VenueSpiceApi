@@ -29,6 +29,117 @@ type MockStripeOnboardingDto = {
 	termsAccepted?: boolean;
 };
 
+const STRIPE_COUNTRY_BY_NAME: Record<string, string> = {
+	'argentina': 'AR',
+	'australia': 'AU',
+	'austria': 'AT',
+	'belgium': 'BE',
+	'brazil': 'BR',
+	'bulgaria': 'BG',
+	'canada': 'CA',
+	'chile': 'CL',
+	'croatia': 'HR',
+	'cyprus': 'CY',
+	'czech republic': 'CZ',
+	'denmark': 'DK',
+	'estonia': 'EE',
+	'finland': 'FI',
+	'france': 'FR',
+	'germany': 'DE',
+	'ghana': 'GH',
+	'greece': 'GR',
+	'hong kong': 'HK',
+	'hungary': 'HU',
+	'india': 'IN',
+	'indonesia': 'ID',
+	'ireland': 'IE',
+	'italy': 'IT',
+	'japan': 'JP',
+	'kenya': 'KE',
+	'latvia': 'LV',
+	'liechtenstein': 'LI',
+	'lithuania': 'LT',
+	'luxembourg': 'LU',
+	'malaysia': 'MY',
+	'malta': 'MT',
+	'mexico': 'MX',
+	'netherlands': 'NL',
+	'new zealand': 'NZ',
+	'nigeria': 'NG',
+	'norway': 'NO',
+	'poland': 'PL',
+	'portugal': 'PT',
+	'romania': 'RO',
+	'singapore': 'SG',
+	'slovakia': 'SK',
+	'slovenia': 'SI',
+	'south africa': 'ZA',
+	'spain': 'ES',
+	'sweden': 'SE',
+	'switzerland': 'CH',
+	'thailand': 'TH',
+	'united arab emirates': 'AE',
+	'united kingdom': 'GB',
+	'uk': 'GB',
+	'united states': 'US',
+	'united states of america': 'US',
+	'usa': 'US',
+};
+
+const STRIPE_CARD_PAYMENTS_COUNTRIES = new Set([
+	'AE',
+	'AR',
+	'AT',
+	'AU',
+	'BE',
+	'BG',
+	'BR',
+	'CA',
+	'CH',
+	'CL',
+	'CY',
+	'CZ',
+	'DE',
+	'DK',
+	'EE',
+	'ES',
+	'FI',
+	'FR',
+	'GB',
+	'GH',
+	'GI',
+	'GR',
+	'HK',
+	'HR',
+	'HU',
+	'ID',
+	'IE',
+	'IN',
+	'IT',
+	'JP',
+	'KE',
+	'LI',
+	'LT',
+	'LU',
+	'LV',
+	'MT',
+	'MX',
+	'MY',
+	'NL',
+	'NO',
+	'NZ',
+	'PL',
+	'PT',
+	'RO',
+	'SE',
+	'SG',
+	'SI',
+	'SK',
+	'TH',
+	'US',
+	'ZA',
+]);
+
 @Injectable()
 export class OrganizationsService {
 	constructor(
@@ -133,9 +244,12 @@ export class OrganizationsService {
 			where: { slug },
 		});
 		if (existing) throw new BadRequestException('Organization slug already exists');
+		const organizerUsername = dto.organizerUsername
+			? await this.getAvailableOrganizerUsernameOrThrow(dto.organizerUsername)
+			: undefined;
 
 		const organization = await this.organizationsRepository.save(
-			this.organizationsRepository.create({ ...dto, slug }),
+			this.organizationsRepository.create({ ...dto, slug, organizerUsername }),
 		);
 		await this.auditService.log(
 			'organization.created',
@@ -162,8 +276,13 @@ export class OrganizationsService {
 			if (existing) throw new BadRequestException('Organization slug already exists');
 		}
 
-		const { termsAccepted, ...updates } = dto;
+		const { termsAccepted, organizerUsername, ...updates } = dto;
 		Object.assign(organization, updates);
+		if (organizerUsername !== undefined) {
+			organization.organizerUsername = organizerUsername.trim()
+				? await this.getAvailableOrganizerUsernameOrThrow(organizerUsername, organization.id)
+				: null;
+		}
 		if (termsAccepted) {
 			organization.termsAcceptedAt = organization.termsAcceptedAt ?? new Date();
 		}
@@ -183,10 +302,36 @@ export class OrganizationsService {
 		return saved;
 	}
 
+	async checkOrganizerUsernameAvailability(username: string, organizationId?: string) {
+		const normalized = this.normalizeOrganizerUsername(username);
+		const validationMessage = this.validateOrganizerUsername(normalized);
+		if (validationMessage) {
+			return {
+				username: normalized,
+				available: false,
+				valid: false,
+				message: validationMessage,
+			};
+		}
+
+		const existing = await this.organizationsRepository.findOne({
+			where: { organizerUsername: normalized },
+		});
+		const available = !existing || existing.id === organizationId;
+
+		return {
+			username: normalized,
+			available,
+			valid: true,
+			message: available ? 'Username is available' : 'Username is already taken',
+		};
+	}
+
 	private pickOrganizationAuditFields(organization: OrganizationEntity) {
 		return {
 			name: organization.name,
 			slug: organization.slug,
+			organizerUsername: organization.organizerUsername,
 			type: organization.type,
 			status: organization.status,
 			contactEmail: organization.contactEmail,
@@ -209,6 +354,40 @@ export class OrganizationsService {
 		return changes;
 	}
 
+	private normalizeOrganizerUsername(value: string) {
+		return value
+			.trim()
+			.replace(/^@+/, '')
+			.toLowerCase()
+			.replace(/\s+/g, '-');
+	}
+
+	private validateOrganizerUsername(value: string) {
+		if (!value) return 'Enter an organizer username';
+		if (value.length < 3) return 'Use at least 3 characters';
+		if (value.length > 30) return 'Use 30 characters or fewer';
+		if (!/^[a-z0-9._-]+$/.test(value)) {
+			return 'Use only letters, numbers, dots, dashes, or underscores';
+		}
+		if (/^[._-]|[._-]$/.test(value)) {
+			return 'Username cannot start or end with a symbol';
+		}
+		return '';
+	}
+
+	private async getAvailableOrganizerUsernameOrThrow(value: string, organizationId?: string) {
+		const normalized = this.normalizeOrganizerUsername(value);
+		const validationMessage = this.validateOrganizerUsername(normalized);
+		if (validationMessage) throw new BadRequestException(validationMessage);
+		const existing = await this.organizationsRepository.findOne({
+			where: { organizerUsername: normalized },
+		});
+		if (existing && existing.id !== organizationId) {
+			throw new BadRequestException('Organizer username is already taken');
+		}
+		return normalized;
+	}
+
 	async createStripeConnectLink(
 		id: string,
 		user: { id: string; role?: string },
@@ -224,12 +403,17 @@ export class OrganizationsService {
 		if (!organization.stripeAccountId) {
 			await this.createAndAttachStripeExpressAccount(organization, secretKey);
 		} else {
-			const accountExists = await this.stripeAccountBelongsToCurrentPlatform(
+			const account = await this.retrieveStripeAccountOrNull(
 				organization.stripeAccountId,
 				secretKey,
 			);
-			if (!accountExists) {
+			if (!account) {
 				await this.createAndAttachStripeExpressAccount(organization, secretKey);
+			} else if (
+				(account.country && account.country !== this.getStripeCountry(organization)) ||
+				this.accountNeedsRecipientServiceAgreement(account)
+			) {
+				await this.replaceStripeAccountForCountryChange(organization, secretKey);
 			} else {
 				await this.requestStripeRequiredCapabilities(organization.stripeAccountId, secretKey);
 			}
@@ -325,13 +509,16 @@ export class OrganizationsService {
 
 	private async createStripeExpressAccount(organization: OrganizationEntity, secretKey: string) {
 		const params = new URLSearchParams();
+		const country = this.getStripeCountry(organization);
 		params.set('type', 'express');
-		params.set('country', 'US');
+		params.set('country', country);
+		if (this.requiresRecipientServiceAgreement(country)) {
+			params.set('tos_acceptance[service_agreement]', 'recipient');
+		}
 		if (organization.contactEmail) {
 			params.set('email', organization.contactEmail);
 		}
-		params.set('capabilities[card_payments][requested]', 'true');
-		params.set('capabilities[transfers][requested]', 'true');
+		this.appendStripeConnectCapabilities(params, country);
 		params.set('business_profile[name]', organization.name);
 		params.set('metadata[organizationId]', organization.id);
 		const payload = await this.stripeRequest<{ id: string }>('/v1/accounts', secretKey, {
@@ -353,10 +540,21 @@ export class OrganizationsService {
 		return organization;
 	}
 
+	private async replaceStripeAccountForCountryChange(organization: OrganizationEntity, secretKey: string) {
+		organization.stripeAccountId = null;
+		organization.stripeAccountType = null;
+		organization.stripeChargesEnabled = false;
+		organization.stripePayoutsEnabled = false;
+		organization.stripeDetailsSubmitted = false;
+		organization.stripeOnboardingCompletedAt = null;
+		await this.organizationsRepository.save(organization);
+		return this.createAndAttachStripeExpressAccount(organization, secretKey);
+	}
+
 	private async requestStripeRequiredCapabilities(accountId: string, secretKey: string) {
+		const account = await this.retrieveStripeAccount(accountId, secretKey);
 		const params = new URLSearchParams();
-		params.set('capabilities[card_payments][requested]', 'true');
-		params.set('capabilities[transfers][requested]', 'true');
+		this.appendStripeConnectCapabilities(params, account.country || 'US');
 		await this.stripeRequest(`/v1/accounts/${encodeURIComponent(accountId)}`, secretKey, {
 			method: 'POST',
 			body: params,
@@ -387,9 +585,14 @@ export class OrganizationsService {
 
 	private async retrieveStripeAccount(accountId: string, secretKey: string) {
 		return this.stripeRequest<{
+			id?: string;
+			country?: string;
 			charges_enabled?: boolean;
 			payouts_enabled?: boolean;
 			details_submitted?: boolean;
+			tos_acceptance?: {
+				service_agreement?: string;
+			};
 			capabilities?: {
 				transfers?: string;
 				card_payments?: string;
@@ -397,6 +600,37 @@ export class OrganizationsService {
 				crypto_transfers?: string;
 			};
 		}>(`/v1/accounts/${encodeURIComponent(accountId)}`, secretKey);
+	}
+
+	private async retrieveStripeAccountOrNull(accountId: string, secretKey: string) {
+		if (accountId.startsWith('acct_mock_')) return null;
+		return this.retrieveStripeAccount(accountId, secretKey).catch(() => null);
+	}
+
+	private appendStripeConnectCapabilities(params: URLSearchParams, country: string) {
+		if (STRIPE_CARD_PAYMENTS_COUNTRIES.has(country)) {
+			params.set('capabilities[card_payments][requested]', 'true');
+		}
+		params.set('capabilities[transfers][requested]', 'true');
+	}
+
+	private requiresRecipientServiceAgreement(country: string) {
+		return !STRIPE_CARD_PAYMENTS_COUNTRIES.has(country.toUpperCase());
+	}
+
+	private accountNeedsRecipientServiceAgreement(account: { country?: string; tos_acceptance?: { service_agreement?: string } }) {
+		const country = account.country?.toUpperCase();
+		return Boolean(country && this.requiresRecipientServiceAgreement(country) && account.tos_acceptance?.service_agreement !== 'recipient');
+	}
+
+	private getStripeCountry(organization: OrganizationEntity) {
+		const normalized = String(organization.country || '').trim().toLowerCase();
+		if (/^[a-z]{2}$/i.test(normalized)) return normalized.toUpperCase();
+		const countryCode = STRIPE_COUNTRY_BY_NAME[normalized];
+		if (!countryCode) {
+			throw new BadRequestException('Set your event organizer country before connecting Stripe payouts.');
+		}
+		return countryCode;
 	}
 
 	private async stripeRequest<T>(path: string, secretKey: string, init: RequestInit = {}) {

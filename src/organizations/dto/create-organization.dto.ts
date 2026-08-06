@@ -11,6 +11,11 @@ export class CreateOrganizationDto {
 	@IsString()
 	slug?: string;
 
+	@ApiPropertyOptional({ example: 'sweetfingers' })
+	@IsOptional()
+	@IsString()
+	organizerUsername?: string;
+
 	@ApiPropertyOptional({ enum: ['vendor', 'organization', 'influencer'], example: 'vendor' })
 	@IsOptional()
 	@IsIn(['vendor', 'organization', 'influencer'])

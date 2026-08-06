@@ -410,6 +410,8 @@ export class AuthService {
 				passwordHash,
 				role: dto.role,
 				isActive: dto.isActive ?? true,
+				verifiedAt: new Date(),
+				activeAt: new Date(),
 			}),
 		);
 

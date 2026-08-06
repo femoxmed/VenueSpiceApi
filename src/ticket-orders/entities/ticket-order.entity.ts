@@ -40,6 +40,21 @@ export class TicketOrderEntity {
 	@Column({ name: 'customer_phone', type: 'varchar', nullable: true })
 	customerPhone?: string | null;
 
+	@Column({ name: 'terms_accepted_at', type: 'timestamptz', nullable: true })
+	termsAcceptedAt?: Date | null;
+
+	@Column({ name: 'terms_version', type: 'varchar', nullable: true })
+	termsVersion?: string | null;
+
+	@Column({ name: 'privacy_version', type: 'varchar', nullable: true })
+	privacyVersion?: string | null;
+
+	@Column({ name: 'refund_policy_version', type: 'varchar', nullable: true })
+	refundPolicyVersion?: string | null;
+
+	@Column({ name: 'pricing_policy_version', type: 'varchar', nullable: true })
+	pricingPolicyVersion?: string | null;
+
 	@Column({ type: 'varchar', default: 'pending' })
 	status: 'pending' | 'paid' | 'cancelled' | 'refunded';
 

@@ -158,6 +158,9 @@ export class TicketOrdersService {
 	}
 
 	async createCheckoutSession(dto: CreateCheckoutSessionDto) {
+		if (!dto.termsAccepted) {
+			throw new BadRequestException('Accept the checkout terms to continue.');
+		}
 		const { event, referralCode, items: preparedItems } = await this.prepareCheckout(dto);
 		const items = preparedItems.map((item) =>
 			this.ticketOrderItemsRepository.create({
@@ -180,6 +183,11 @@ export class TicketOrdersService {
 				customerName: dto.customerName,
 				customerEmail: dto.customerEmail,
 				customerPhone: dto.customerPhone,
+				termsAcceptedAt: new Date(),
+				termsVersion: '2026-08-04',
+				privacyVersion: '2024-07-13',
+				refundPolicyVersion: '2026-08-03',
+				pricingPolicyVersion: '2026-08-04',
 				status: 'pending',
 				subtotal,
 				tax: 0,

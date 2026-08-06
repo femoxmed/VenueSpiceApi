@@ -1,6 +1,7 @@
 import {
 	ArrayMinSize,
 	IsArray,
+	IsBoolean,
 	IsEmail,
 	IsInt,
 	IsOptional,
@@ -43,4 +44,7 @@ export class CreateCheckoutSessionDto {
 	@ValidateNested({ each: true })
 	@Type(() => CheckoutTicketItemDto)
 	items: CheckoutTicketItemDto[];
+
+	@IsBoolean()
+	termsAccepted: boolean;
 }
