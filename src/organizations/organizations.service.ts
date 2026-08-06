@@ -2,10 +2,17 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
+import * as bcrypt from 'bcrypt';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
+import { CreateOrganizationMemberDto } from './dto/create-organization-member.dto';
+import { UpdateOrganizationMemberDto } from './dto/update-organization-member.dto';
+import { OrganizationMemberEntity } from './entities/organization-member.entity';
 import { OrganizationEntity } from './entities/organization.entity';
 import { AuditService } from '../audit/audit.service';
 import { Request } from 'express';
+import { UserEntity } from '../auth/entities/user.entity';
+import { Role } from '../common/enums/role.enum';
+import { NotificationsService } from '../notifications/notifications.service';
 
 type MockStripeOnboardingDto = {
 	businessType?: string;
@@ -145,8 +152,13 @@ export class OrganizationsService {
 	constructor(
 		@InjectRepository(OrganizationEntity)
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
+		@InjectRepository(OrganizationMemberEntity)
+		private readonly organizationMembersRepository: Repository<OrganizationMemberEntity>,
+		@InjectRepository(UserEntity)
+		private readonly usersRepository: Repository<UserEntity>,
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
+		private readonly notificationsService: NotificationsService,
 	) {}
 
 	findAll() {
@@ -327,6 +339,165 @@ export class OrganizationsService {
 		};
 	}
 
+	async suggestOrganizerUsernames(firstName: string, lastName: string) {
+		const first = this.normalizeOrganizerUsername(firstName).replace(/[._-]+/g, '');
+		const last = this.normalizeOrganizerUsername(lastName).replace(/[._-]+/g, '');
+		const compactName = [first, last].filter(Boolean).join('');
+		const dashedName = [first, last].filter(Boolean).join('-');
+		const seed = compactName || dashedName || 'organizer';
+		const year = new Date().getFullYear();
+		const candidates = Array.from(
+			new Set(
+				[
+					dashedName,
+					compactName,
+					`${seed}-events`,
+					`${seed}-organizer`,
+					`${seed}${year}`,
+					`${seed}-hq`,
+				]
+					.map((candidate) => this.normalizeOrganizerUsername(candidate))
+					.filter((candidate) => candidate && !this.validateOrganizerUsername(candidate)),
+			),
+		);
+
+		const suggestions: string[] = [];
+		for (const candidate of candidates) {
+			const available = await this.checkOrganizerUsernameAvailability(candidate);
+			if (available.available) suggestions.push(available.username);
+			if (suggestions.length >= 3) break;
+		}
+
+		let suffix = 2;
+		while (suggestions.length < 3 && suffix < 100) {
+			const candidate = this.normalizeOrganizerUsername(`${seed}${suffix}`);
+			const available = await this.checkOrganizerUsernameAvailability(candidate);
+			if (available.available) suggestions.push(available.username);
+			suffix += 1;
+		}
+
+		return { suggestions };
+	}
+
+	async listOrganizationMembers(id: string, user?: { id: string; email?: string; role?: string }) {
+		const organization = await this.findOne(id);
+		if (user) {
+			await this.ensureOrganizationTeamManager(organization, user);
+		}
+
+		const members = await this.organizationMembersRepository.find({
+			where: { organizationId: id },
+			order: { createdAt: 'ASC' },
+		});
+
+		return members.map((member) => this.toOrganizationMemberDto(member));
+	}
+
+	async createOrganizationMember(
+		id: string,
+		dto: CreateOrganizationMemberDto,
+		user?: { id: string; email?: string; role?: string },
+		request?: Request,
+	) {
+		const organization = await this.findOne(id);
+		if (user) {
+			await this.ensureOrganizationTeamManager(organization, user);
+		}
+		const email = dto.email.trim().toLowerCase();
+		const role = this.getOrganizationMemberRole(dto.role);
+		let memberUser = await this.usersRepository.findOne({ where: { email } });
+		const generatedPassword = dto.password || this.generateTemporaryPassword();
+
+		if (!memberUser) {
+			memberUser = await this.usersRepository.save(
+				this.usersRepository.create({
+					fullName: dto.fullName.trim(),
+					email,
+					passwordHash: await bcrypt.hash(generatedPassword, 10),
+					role,
+					accountType: 'organization',
+					businessName: organization.name,
+					isActive: true,
+					verifiedAt: new Date(),
+					activeAt: new Date(),
+				}),
+			);
+		}
+
+		const existingMember = await this.organizationMembersRepository.findOne({
+			where: { organizationId: id, userId: memberUser.id },
+		});
+		if (existingMember) throw new BadRequestException('This user is already on the organizer team');
+
+		const member = await this.organizationMembersRepository.save(
+			this.organizationMembersRepository.create({
+				organizationId: id,
+				userId: memberUser.id,
+				role,
+				status: 'active',
+			}),
+		);
+
+		await this.notificationsService.queueEmail(
+			memberUser.email,
+			`You have been added to ${organization.name} on Venue Spice`,
+			this.buildOrganizationMemberInviteEmail(memberUser.fullName, organization.name, memberUser.email, generatedPassword, role),
+		);
+		await this.auditService.log(
+			'organization.member.created',
+			user,
+			'organization',
+			organization.id,
+			{ after: { userId: memberUser.id, email: memberUser.email, role } },
+			undefined,
+			request,
+		);
+
+		const saved = await this.organizationMembersRepository.findOneOrFail({ where: { id: member.id } });
+		return this.toOrganizationMemberDto(saved);
+	}
+
+	async updateOrganizationMember(
+		id: string,
+		memberId: string,
+		dto: UpdateOrganizationMemberDto,
+		user?: { id: string; email?: string; role?: string },
+		request?: Request,
+	) {
+		const organization = await this.findOne(id);
+		if (user) {
+			await this.ensureOrganizationTeamManager(organization, user);
+		}
+		const member = await this.organizationMembersRepository.findOne({
+			where: { id: memberId, organizationId: id },
+		});
+		if (!member) throw new NotFoundException('Team member not found');
+		const before = { role: member.role, status: member.status };
+
+		if (dto.role) {
+			member.role = this.getOrganizationMemberRole(dto.role);
+			await this.usersRepository.update(member.userId, { role: member.role });
+		}
+		if (dto.isActive !== undefined) {
+			member.status = dto.isActive ? 'active' : 'inactive';
+			await this.usersRepository.update(member.userId, { isActive: dto.isActive });
+		}
+
+		const saved = await this.organizationMembersRepository.save(member);
+		await this.auditService.log(
+			'organization.member.updated',
+			user,
+			'organization',
+			organization.id,
+			{ before, after: { role: saved.role, status: saved.status } },
+			{ memberId },
+			request,
+		);
+
+		const reloaded = await this.organizationMembersRepository.findOneOrFail({ where: { id: saved.id } });
+		return this.toOrganizationMemberDto(reloaded);
+	}
+
 	private pickOrganizationAuditFields(organization: OrganizationEntity) {
 		return {
 			name: organization.name,
@@ -386,6 +557,51 @@ export class OrganizationsService {
 			throw new BadRequestException('Organizer username is already taken');
 		}
 		return normalized;
+	}
+
+	private getOrganizationMemberRole(role?: Role) {
+		if (!role) return Role.ORG_STAFF;
+		if (role !== Role.ORG_ADMIN && role !== Role.ORG_STAFF) {
+			throw new BadRequestException('Organizer team role must be org_admin or org_staff');
+		}
+		return role;
+	}
+
+	private toOrganizationMemberDto(member: OrganizationMemberEntity) {
+		return {
+			id: member.id,
+			organizationId: member.organizationId,
+			userId: member.userId,
+			role: member.role,
+			status: member.status,
+			isActive: member.status === 'active' && member.user?.isActive !== false,
+			fullName: member.user?.fullName || '',
+			email: member.user?.email || '',
+			createdAt: member.createdAt,
+			updatedAt: member.updatedAt,
+		};
+	}
+
+	private generateTemporaryPassword() {
+		return `Venue${Math.random().toString(36).slice(2, 8)}${Math.floor(100 + Math.random() * 900)}!`;
+	}
+
+	private buildOrganizationMemberInviteEmail(
+		fullName: string,
+		organizationName: string,
+		email: string,
+		password: string,
+		role: Role,
+	) {
+		return `
+			<div style="font-family:Arial,sans-serif;line-height:1.6;color:#151922">
+				<h2>You have been added to ${organizationName}</h2>
+				<p>Hello ${fullName || 'there'},</p>
+				<p>You can now help manage ${organizationName} on Venue Spice.</p>
+				<p><strong>Email:</strong> ${email}<br/><strong>Temporary password:</strong> ${password}<br/><strong>Role:</strong> ${role}</p>
+				<p>Please sign in and update your password from your account settings.</p>
+			</div>
+		`;
 	}
 
 	async createStripeConnectLink(
@@ -654,6 +870,16 @@ export class OrganizationsService {
 		if (organization.ownerUserId !== user.id) {
 			throw new ForbiddenException('You cannot manage payouts for this organization');
 		}
+	}
+
+	private async ensureOrganizationTeamManager(organization: OrganizationEntity, user: { id: string; role?: string }) {
+		if (['super_admin', 'platform_admin', 'admin'].includes(user.role || '')) return;
+		if (organization.ownerUserId === user.id) return;
+		const member = await this.organizationMembersRepository.findOne({
+			where: { organizationId: organization.id, userId: user.id },
+		});
+		if (member?.status === 'active' && member.role === Role.ORG_ADMIN) return;
+		throw new ForbiddenException('You cannot manage users for this organization');
 	}
 
 	private validateMockStripeOnboarding(dto: MockStripeOnboardingDto) {

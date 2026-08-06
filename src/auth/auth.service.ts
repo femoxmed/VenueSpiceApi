@@ -698,11 +698,15 @@ export class AuthService {
 		if (!name || !dto.accountType) return null;
 
 		const slug = await this.buildUniqueOrganizationSlug(name);
+		const organizerUsername = dto.accountType === 'organization' && dto.organizerUsername?.trim()
+			? await this.getAvailableOrganizerUsernameOrThrow(dto.organizerUsername)
+			: null;
 
 		return this.organizationsRepository.save(
 			this.organizationsRepository.create({
 				name,
 				slug,
+				organizerUsername,
 				type: dto.accountType,
 				ownerUserId: user.id,
 				contactEmail: user.email,
@@ -719,6 +723,40 @@ export class AuthService {
 				status: 'active',
 			}),
 		);
+	}
+
+	private normalizeOrganizerUsername(value: string) {
+		return value
+			.trim()
+			.replace(/^@+/, '')
+			.toLowerCase()
+			.replace(/\s+/g, '-');
+	}
+
+	private validateOrganizerUsername(value: string) {
+		if (!value) return 'Enter an organizer username';
+		if (value.length < 3) return 'Use at least 3 characters';
+		if (value.length > 30) return 'Use 30 characters or fewer';
+		if (!/^[a-z0-9._-]+$/.test(value)) {
+			return 'Use only letters, numbers, dots, dashes, or underscores';
+		}
+		if (/^[._-]|[._-]$/.test(value)) {
+			return 'Username cannot start or end with a symbol';
+		}
+		return '';
+	}
+
+	private async getAvailableOrganizerUsernameOrThrow(value: string) {
+		const normalized = this.normalizeOrganizerUsername(value);
+		const validationMessage = this.validateOrganizerUsername(normalized);
+		if (validationMessage) throw new BadRequestException(validationMessage);
+		const existing = await this.organizationsRepository.findOne({
+			where: { organizerUsername: normalized },
+		});
+		if (existing) {
+			throw new BadRequestException('Organizer username is already taken');
+		}
+		return normalized;
 	}
 
 	private async buildUniqueOrganizationSlug(name: string) {

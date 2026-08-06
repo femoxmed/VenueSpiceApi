@@ -338,6 +338,8 @@ export class EventsService {
 				id: organization.id,
 				name: organization.name,
 				slug: organization.slug,
+				organizerUsername: organization.organizerUsername,
+				logoUrl: organization.logoUrl,
 			} : undefined,
 			organizerPayoutReady: Boolean(
 				organization?.stripeChargesEnabled &&

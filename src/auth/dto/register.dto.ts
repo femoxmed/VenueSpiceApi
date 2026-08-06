@@ -30,6 +30,11 @@ export class RegisterDto {
   @IsString()
   businessName?: string;
 
+  @ApiPropertyOptional({ example: 'femi-events' })
+  @IsOptional()
+  @IsString()
+  organizerUsername?: string;
+
   @ApiPropertyOptional({ example: 'Catering' })
   @IsOptional()
   @IsString()

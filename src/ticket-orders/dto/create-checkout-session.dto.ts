@@ -1,5 +1,4 @@
 import {
-	ArrayMinSize,
 	IsArray,
 	IsBoolean,
 	IsEmail,
@@ -15,6 +14,15 @@ import { Type } from 'class-transformer';
 export class CheckoutTicketItemDto {
 	@IsString()
 	ticketTypeId: string;
+
+	@IsInt()
+	@Min(1)
+	quantity: number;
+}
+
+export class CheckoutAddOnItemDto {
+	@IsString()
+	addOnId: string;
 
 	@IsInt()
 	@Min(1)
@@ -39,11 +47,17 @@ export class CreateCheckoutSessionDto {
 	@IsString()
 	referralCode?: string;
 
+	@IsOptional()
 	@IsArray()
-	@ArrayMinSize(1)
 	@ValidateNested({ each: true })
 	@Type(() => CheckoutTicketItemDto)
-	items: CheckoutTicketItemDto[];
+	items?: CheckoutTicketItemDto[];
+
+	@IsOptional()
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => CheckoutAddOnItemDto)
+	addOns?: CheckoutAddOnItemDto[];
 
 	@IsBoolean()
 	termsAccepted: boolean;

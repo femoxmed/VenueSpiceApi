@@ -21,6 +21,7 @@ import { AuditLogEntity } from './audit/entities/audit-log.entity';
 import { Upload } from './uploads/entities/upload.entity';
 import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
+import { OrganizationMemberEntity } from './organizations/entities/organization-member.entity';
 import { EventEntity } from './events/entities/event.entity';
 import { TicketTypeEntity } from './events/entities/ticket-type.entity';
 import { AgentEntity } from './agents/entities/agent.entity';
@@ -91,6 +92,7 @@ async function syncSuperAdmins() {
 			Upload,
 			BlogEntity,
 			OrganizationEntity,
+			OrganizationMemberEntity,
 			EventEntity,
 			TicketTypeEntity,
 			AgentEntity,

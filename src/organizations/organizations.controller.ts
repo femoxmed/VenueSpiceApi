@@ -5,30 +5,29 @@ import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
+import { CreateOrganizationMemberDto } from './dto/create-organization-member.dto';
+import { UpdateOrganizationMemberDto } from './dto/update-organization-member.dto';
 import { OrganizationsService } from './organizations.service';
 
 @ApiTags('Organizations')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Controller('organizations')
 export class OrganizationsController {
 	constructor(private readonly organizationsService: OrganizationsService) {}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
 	@Get()
 	findAll() {
 		return this.organizationsService.findAll();
 	}
 
-	@ApiBearerAuth()
 	@UseGuards(JwtAuthGuard)
 	@Get('mine')
 	findMine(@Req() req: { user: { id: string } }) {
 		return this.organizationsService.findMine(req.user.id);
 	}
 
-	@ApiBearerAuth()
-	@UseGuards(JwtAuthGuard)
 	@Get('username-availability')
 	checkOrganizerUsernameAvailability(
 		@Query('username') username = '',
@@ -37,6 +36,15 @@ export class OrganizationsController {
 		return this.organizationsService.checkOrganizerUsernameAvailability(username, organizationId);
 	}
 
+	@Get('username-suggestions')
+	suggestOrganizerUsernames(
+		@Query('firstName') firstName = '',
+		@Query('lastName') lastName = '',
+	) {
+		return this.organizationsService.suggestOrganizerUsernames(firstName, lastName);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
 	@Post()
 	create(
@@ -46,17 +54,50 @@ export class OrganizationsController {
 		return this.organizationsService.create(dto, req.user, req as any);
 	}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
 	@Get(':id')
 	findOne(@Param('id') id: string) {
 		return this.organizationsService.findOne(id);
 	}
 
+	@UseGuards(JwtAuthGuard)
 	@Get(':id/stripe/status')
 	getStripeStatus(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
 		return this.organizationsService.getStripeStatus(id, req.user);
 	}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF)
+	@Get(':id/team')
+	listTeam(@Param('id') id: string, @Req() req: { user: { id: string; email?: string; role?: Role } }) {
+		return this.organizationsService.listOrganizationMembers(id, req.user);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
+	@Post(':id/team')
+	createTeamMember(
+		@Param('id') id: string,
+		@Body() dto: CreateOrganizationMemberDto,
+		@Req() req: { user: { id: string; email?: string; role?: Role } },
+	) {
+		return this.organizationsService.createOrganizationMember(id, dto, req.user, req as any);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
+	@Patch(':id/team/:memberId')
+	updateTeamMember(
+		@Param('id') id: string,
+		@Param('memberId') memberId: string,
+		@Body() dto: UpdateOrganizationMemberDto,
+		@Req() req: { user: { id: string; email?: string; role?: Role } },
+	) {
+		return this.organizationsService.updateOrganizationMember(id, memberId, dto, req.user, req as any);
+	}
+
+	@UseGuards(JwtAuthGuard)
 	@Post(':id/stripe/connect')
 	createStripeConnectLink(
 		@Param('id') id: string,
@@ -66,6 +107,7 @@ export class OrganizationsController {
 		return this.organizationsService.createStripeConnectLink(id, req.user, dto.returnUrl);
 	}
 
+	@UseGuards(JwtAuthGuard)
 	@Post(':id/stripe/mock-complete')
 	completeStripeOnboarding(
 		@Param('id') id: string,
@@ -75,6 +117,7 @@ export class OrganizationsController {
 		return this.organizationsService.completeMockStripeOnboarding(id, req.user, dto);
 	}
 
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)
 	@Patch(':id')
 	update(

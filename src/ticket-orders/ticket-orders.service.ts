@@ -17,7 +17,7 @@ import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
-import { CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
+import { CheckoutAddOnItemDto, CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
 import { PreviewCheckoutFeesDto } from './dto/preview-checkout-fees.dto';
 import { IssuedTicketEntity } from './entities/issued-ticket.entity';
@@ -57,8 +57,23 @@ type StripeConnectedAccount = {
 };
 
 type PreparedCheckoutItem = {
-	ticketType: TicketTypeEntity;
+	kind: 'ticket' | 'add_on';
+	ticketType?: TicketTypeEntity;
+	addOnId?: string;
 	ticketName: string;
+	description?: string | null;
+	imageUrl?: string | null;
+	quantity: number;
+	unitPrice: number;
+	lineTotal: number;
+	feePayer: 'buyer' | 'organizer';
+};
+
+type PreparedCheckoutAddOn = {
+	id: string;
+	name: string;
+	description?: string | null;
+	imageUrl?: string | null;
 	quantity: number;
 	unitPrice: number;
 	lineTotal: number;
@@ -162,9 +177,22 @@ export class TicketOrdersService {
 			throw new BadRequestException('Accept the checkout terms to continue.');
 		}
 		const { event, referralCode, items: preparedItems } = await this.prepareCheckout(dto);
-		const items = preparedItems.map((item) =>
+		const ticketItems = preparedItems.filter((item) => item.kind === 'ticket' && item.ticketType);
+		const addOns = preparedItems
+			.filter((item) => item.kind === 'add_on')
+			.map((item): PreparedCheckoutAddOn => ({
+				id: item.addOnId ?? item.ticketName,
+				name: item.ticketName,
+				description: item.description,
+				imageUrl: item.imageUrl,
+				quantity: item.quantity,
+				unitPrice: item.unitPrice,
+				lineTotal: item.lineTotal,
+				feePayer: item.feePayer,
+			}));
+		const items = ticketItems.map((item) =>
 			this.ticketOrderItemsRepository.create({
-				ticketType: item.ticketType,
+				ticketType: item.ticketType!,
 				ticketName: item.ticketName,
 				quantity: item.quantity,
 				unitPrice: item.unitPrice,
@@ -199,7 +227,10 @@ export class TicketOrdersService {
 				platformFeeFixed: feeEstimate.platformFeeFixed,
 				processingFeePercent: feeEstimate.processingFeePercent,
 				processingFeeFixed: feeEstimate.processingFeeFixed,
-				feeSnapshot: feeEstimate,
+				feeSnapshot: {
+					...feeEstimate,
+					addOns,
+				},
 				total: feeEstimate.total,
 				currency,
 				items,
@@ -238,7 +269,8 @@ export class TicketOrdersService {
 	private async prepareCheckout(dto: {
 		eventId: string;
 		referralCode?: string;
-		items: CheckoutTicketItemDto[];
+		items?: CheckoutTicketItemDto[];
+		addOns?: CheckoutAddOnItemDto[];
 	}) {
 		const event = await this.eventsRepository.findOne({
 			where: { id: dto.eventId },
@@ -246,13 +278,20 @@ export class TicketOrdersService {
 		if (!event || event.status !== 'published') {
 			throw new BadRequestException('Published event not found');
 		}
+		const requestedTickets = dto.items ?? [];
+		const requestedAddOns = dto.addOns ?? [];
+		if (!requestedTickets.length && !requestedAddOns.length) {
+			throw new BadRequestException('Select at least one ticket or add-on.');
+		}
 
-		const ticketTypeIds = dto.items.map((item) => item.ticketTypeId);
+		const ticketTypeIds = requestedTickets.map((item) => item.ticketTypeId);
 		const uniqueTicketTypeIds = Array.from(new Set(ticketTypeIds));
-		const ticketTypes = await this.ticketTypesRepository.find({
-			where: { id: In(uniqueTicketTypeIds) },
-			relations: { event: true },
-		});
+		const ticketTypes = uniqueTicketTypeIds.length
+			? await this.ticketTypesRepository.find({
+					where: { id: In(uniqueTicketTypeIds) },
+					relations: { event: true },
+			  })
+			: [];
 
 		if (ticketTypes.length !== uniqueTicketTypeIds.length) {
 			throw new BadRequestException('One or more ticket types are invalid');
@@ -267,7 +306,7 @@ export class TicketOrdersService {
 			await this.ensureDiscountCouponCanBeUsed(dto.referralCode, event);
 		}
 
-		const items: PreparedCheckoutItem[] = dto.items.map((item) => {
+		const ticketItems: PreparedCheckoutItem[] = requestedTickets.map((item) => {
 			const ticketType = ticketTypes.find((ticket) => ticket.id === item.ticketTypeId);
 			if (!ticketType || ticketType.event.id !== event.id) {
 				throw new BadRequestException('Ticket type does not belong to this event');
@@ -281,14 +320,41 @@ export class TicketOrdersService {
 			}
 			const unitPrice = Number(ticketType.price);
 			return {
+				kind: 'ticket',
 				ticketType,
 				ticketName: ticketType.name,
+				description: ticketType.description,
 				quantity: item.quantity,
 				unitPrice,
 				lineTotal: unitPrice * item.quantity,
 				feePayer: ticketType.includeCharges ? 'organizer' : 'buyer',
 			};
 		});
+		const eventAddOns = this.normalizeEventAddOns(event);
+		const addOnItems: PreparedCheckoutItem[] = requestedAddOns.map((item) => {
+			const addOn = eventAddOns.find((entry) => entry.id === item.addOnId);
+			if (!addOn) {
+				throw new BadRequestException('One or more add-ons are invalid');
+			}
+			if (item.quantity > addOn.quantity) {
+				throw new BadRequestException(`${addOn.name} only has ${addOn.quantity} remaining`);
+			}
+			if (addOn.limitPerPerson && item.quantity > addOn.limitPerPerson) {
+				throw new BadRequestException(`${addOn.name} is limited to ${addOn.limitPerPerson} per order`);
+			}
+			return {
+				kind: 'add_on',
+				addOnId: addOn.id,
+				ticketName: addOn.name,
+				description: addOn.description,
+				imageUrl: addOn.imageUrl,
+				quantity: item.quantity,
+				unitPrice: addOn.price,
+				lineTotal: addOn.price * item.quantity,
+				feePayer: addOn.includeCharges ? 'organizer' : 'buyer',
+			};
+		});
+		const items = [...ticketItems, ...addOnItems];
 
 		return { event, referralCode, items };
 	}
@@ -386,6 +452,7 @@ export class TicketOrdersService {
 			}
 			await this.ticketTypesRepository.save(item.ticketType);
 		}
+		await this.decrementPaidAddOnInventory(order);
 
 		if (order.referralCode) {
 			order.referralCode.usesCount += 1;
@@ -456,6 +523,27 @@ export class TicketOrdersService {
 			);
 		});
 		let lineItemIndex = order.items.length;
+		this.getOrderAddOns(order).forEach((addOn) => {
+			params.set(`line_items[${lineItemIndex}][quantity]`, String(addOn.quantity));
+			params.set(`line_items[${lineItemIndex}][price_data][currency]`, order.currency.toLowerCase());
+			this.appendStripeTaxSettings(params, `line_items[${lineItemIndex}][price_data]`, settings);
+			params.set(
+				`line_items[${lineItemIndex}][price_data][unit_amount]`,
+				String(Math.round(Number(addOn.unitPrice) * 100)),
+			);
+			params.set(`line_items[${lineItemIndex}][price_data][product_data][name]`, addOn.name);
+			if (settings.stripeTaxCode.trim()) {
+				params.set(
+					`line_items[${lineItemIndex}][price_data][product_data][tax_code]`,
+					settings.stripeTaxCode.trim(),
+				);
+			}
+			params.set(
+				`line_items[${lineItemIndex}][price_data][product_data][description]`,
+				addOn.description || order.event.title,
+			);
+			lineItemIndex += 1;
+		});
 		const buyerPlatformFee = this.feeSnapshotNumber(order, 'buyerPlatformFee', order.feePayer === 'buyer' ? Number(order.platformFee ?? 0) : 0);
 		const buyerProcessingFee = this.feeSnapshotNumber(order, 'buyerProcessingFee', order.feePayer === 'buyer' ? Number(order.processingFee ?? 0) : 0);
 		if (buyerPlatformFee > 0) {
@@ -578,6 +666,69 @@ export class TicketOrdersService {
 		const value = order.feeSnapshot?.[key];
 		const numeric = Number(value);
 		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	private getOrderAddOns(order: TicketOrderEntity): PreparedCheckoutAddOn[] {
+		const addOns = order.feeSnapshot?.addOns;
+		if (!Array.isArray(addOns)) return [];
+		return addOns
+			.map((item): PreparedCheckoutAddOn => {
+				const record = item as Record<string, unknown>;
+				const quantity = Number(record.quantity || 0);
+				const unitPrice = Number(record.unitPrice || 0);
+				const feePayer: PreparedCheckoutAddOn['feePayer'] = record.feePayer === 'organizer' ? 'organizer' : 'buyer';
+				return {
+					id: String(record.id || record.name || 'add-on'),
+					name: String(record.name || 'Add-on'),
+					description: typeof record.description === 'string' ? record.description : null,
+					imageUrl: typeof record.imageUrl === 'string' ? record.imageUrl : null,
+					quantity,
+					unitPrice,
+					lineTotal: Number(record.lineTotal ?? unitPrice * quantity),
+					feePayer,
+				};
+			})
+			.filter((item) => item.quantity > 0);
+	}
+
+	private normalizeEventAddOns(event: EventEntity) {
+		return (event.addOns || [])
+			.map((raw, index) => {
+				const record = raw as Record<string, unknown>;
+				const name = String(record.type || record.customType || 'Add-on').trim();
+				const quantity = Math.max(0, Number(record.quantity ?? 0));
+				const limit = Number(record.limitPerPerson ?? record.limit ?? 0);
+				return {
+					id: String(record.id || `add-on-${index}`),
+					name: name || 'Add-on',
+					description: typeof record.description === 'string' ? record.description : null,
+					imageUrl: typeof record.imageUrl === 'string' ? record.imageUrl : null,
+					quantity,
+					limitPerPerson: Number.isFinite(limit) && limit > 0 ? limit : null,
+					price: Math.max(0, Number(record.price || 0)),
+					includeCharges: Boolean(record.includeCharges),
+				};
+			})
+			.filter((item) => item.name || item.description || item.imageUrl);
+	}
+
+	private async decrementPaidAddOnInventory(order: TicketOrderEntity) {
+		const paidAddOns = this.getOrderAddOns(order);
+		if (!paidAddOns.length) return;
+		const event = await this.eventsRepository.findOne({ where: { id: order.event.id } });
+		if (!event?.addOns?.length) return;
+		event.addOns = event.addOns.map((raw, index) => {
+			const record = { ...(raw as Record<string, unknown>) };
+			const id = String(record.id || `add-on-${index}`);
+			const paid = paidAddOns.find((item) => item.id === id);
+			if (!paid) return raw;
+			const currentQuantity = Math.max(0, Number(record.quantity ?? 0));
+			return {
+				...record,
+				quantity: Math.max(0, currentQuantity - paid.quantity),
+			};
+		});
+		await this.eventsRepository.save(event);
 	}
 
 	private roundMoney(value: number) {
@@ -721,6 +872,14 @@ export class TicketOrdersService {
 			};
 		}
 
+		const addOnInvoiceItems = this.getOrderAddOns(order).map((item) =>
+			this.invoiceItemsRepository.create({
+				description: `${item.name} - ${order.event.title}`,
+				qty: item.quantity,
+				unitPrice: Number(item.unitPrice),
+				lineTotal: Number(item.lineTotal),
+			}),
+		);
 		const invoice = await this.invoicesRepository.save(
 			this.invoicesRepository.create({
 				invoiceNumber: this.buildInvoiceNumber(),
@@ -730,14 +889,17 @@ export class TicketOrdersService {
 				tax: Number(order.tax ?? 0),
 				total: Number(order.total ?? 0),
 				issuedAt: new Date(),
-				items: order.items.map((item) =>
-					this.invoiceItemsRepository.create({
-						description: `${item.ticketName} - ${order.event.title}`,
-						qty: item.quantity,
-						unitPrice: Number(item.unitPrice),
-						lineTotal: Number(item.lineTotal),
-					}),
-				),
+				items: [
+					...order.items.map((item) =>
+						this.invoiceItemsRepository.create({
+							description: `${item.ticketName} - ${order.event.title}`,
+							qty: item.quantity,
+							unitPrice: Number(item.unitPrice),
+							lineTotal: Number(item.lineTotal),
+						}),
+					),
+					...addOnInvoiceItems,
+				],
 			}),
 		);
 
@@ -761,6 +923,7 @@ export class TicketOrdersService {
 					demo: true,
 					ticketOrderId: order.id,
 					eventId: order.event.id,
+					addOns: this.getOrderAddOns(order),
 				},
 			}),
 		);

@@ -8,6 +8,7 @@ import {
 } from 'typeorm';
 import { EventEntity } from '../../events/entities/event.entity';
 import { AgentEntity } from '../../agents/entities/agent.entity';
+import { OrganizationMemberEntity } from './organization-member.entity';
 
 @Entity('organizations')
 export class OrganizationEntity {
@@ -133,6 +134,9 @@ export class OrganizationEntity {
 
 	@OneToMany(() => AgentEntity, (agent) => agent.organization)
 	agents: AgentEntity[];
+
+	@OneToMany(() => OrganizationMemberEntity, (member) => member.organization)
+	members: OrganizationMemberEntity[];
 
 	@CreateDateColumn({ name: 'created_at' })
 	createdAt: Date;
