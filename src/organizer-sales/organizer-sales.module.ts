@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
+import { UserEntity } from '../auth/entities/user.entity';
 import { FinancialLedgerModule } from '../financial-ledger/financial-ledger.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
@@ -16,7 +18,9 @@ import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 		ConfigModule,
 		AuditModule,
 		FinancialLedgerModule,
+		NotificationsModule,
 		TypeOrmModule.forFeature([
+			UserEntity,
 			OrganizationEntity,
 			OrganizationMemberEntity,
 			TicketOrderEntity,

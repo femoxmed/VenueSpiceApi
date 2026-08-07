@@ -33,25 +33,25 @@ export class WithdrawalRequestEntity {
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount: number;
 
-	@Column({ default: 'USD' })
+	@Column({ type: 'varchar', default: 'USD' })
 	currency: string;
 
 	@Column({ name: 'available_balance_snapshot', type: 'decimal', precision: 12, scale: 2, default: 0 })
 	availableBalanceSnapshot: number;
 
-	@Column({ name: 'stripe_account_id', nullable: true })
+	@Column({ name: 'stripe_account_id', type: 'varchar', nullable: true })
 	stripeAccountId?: string | null;
 
-	@Column({ name: 'requested_by_user_id', nullable: true })
+	@Column({ name: 'requested_by_user_id', type: 'varchar', nullable: true })
 	requestedByUserId?: string | null;
 
-	@Column({ name: 'requested_by_email', nullable: true })
+	@Column({ name: 'requested_by_email', type: 'varchar', nullable: true })
 	requestedByEmail?: string | null;
 
-	@Column({ name: 'reviewed_by_user_id', nullable: true })
+	@Column({ name: 'reviewed_by_user_id', type: 'varchar', nullable: true })
 	reviewedByUserId?: string | null;
 
-	@Column({ name: 'reviewed_by_email', nullable: true })
+	@Column({ name: 'reviewed_by_email', type: 'varchar', nullable: true })
 	reviewedByEmail?: string | null;
 
 	@Column({ name: 'requester_note', type: 'text', nullable: true })
@@ -60,7 +60,7 @@ export class WithdrawalRequestEntity {
 	@Column({ name: 'admin_note', type: 'text', nullable: true })
 	adminNote?: string | null;
 
-	@Column({ name: 'stripe_transfer_id', nullable: true })
+	@Column({ name: 'stripe_transfer_id', type: 'varchar', nullable: true })
 	stripeTransferId?: string | null;
 
 	@Column({ name: 'source_entry_ids', type: 'jsonb', nullable: true })

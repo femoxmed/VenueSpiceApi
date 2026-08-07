@@ -114,6 +114,12 @@ export class OrganizerSalesController {
 		return this.organizerSalesService.listAdminWithdrawalRequests(status);
 	}
 
+	@Get('admin/stripe-balance')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	adminStripeBalance() {
+		return this.organizerSalesService.getStripePlatformBalance();
+	}
+
 	@Patch('admin/withdrawal-requests/:id/approve')
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
 	approveWithdrawalRequest(

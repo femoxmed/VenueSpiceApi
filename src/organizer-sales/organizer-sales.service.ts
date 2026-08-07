@@ -1,11 +1,13 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
@@ -33,6 +35,8 @@ type SalesLine = {
 @Injectable()
 export class OrganizerSalesService {
 	constructor(
+		@InjectRepository(UserEntity)
+		private readonly usersRepository: Repository<UserEntity>,
 		@InjectRepository(OrganizationEntity)
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
 		@InjectRepository(OrganizationMemberEntity)
@@ -46,6 +50,7 @@ export class OrganizerSalesService {
 		private readonly ledgerService: FinancialLedgerService,
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
+		private readonly notificationsService: NotificationsService,
 	) {}
 
 	async summary(organizationId: string, user: SalesUser) {
@@ -54,7 +59,7 @@ export class OrganizerSalesService {
 		const paidOrders = orders.filter((order) => order.status === 'paid');
 		const refundedOrders = orders.filter((order) => order.status === 'refunded');
 		const lines = paidOrders.flatMap((order) => this.buildOrderLines(order));
-		const balance = await this.ledgerService.getBalance(organizationId);
+		const balance = await this.getAdjustedBalance(organizationId);
 
 		return {
 			currency: paidOrders[0]?.currency || orders[0]?.currency || 'USD',
@@ -184,7 +189,7 @@ export class OrganizerSalesService {
 
 	async balance(organizationId: string, user: SalesUser) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		return this.ledgerService.getBalance(organizationId);
+		return this.getAdjustedBalance(organizationId);
 	}
 
 	async listWithdrawalRequests(organizationId: string, user: SalesUser) {
@@ -208,7 +213,9 @@ export class OrganizerSalesService {
 			throw new BadRequestException('Finish Stripe payout setup before requesting a withdrawal.');
 		}
 		const entries = await this.ledgerService.getWithdrawableEntries(organizationId);
-		const available = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+		const grossAvailable = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const available = this.roundMoney(Math.max(0, grossAvailable - reserved));
 		const currency = entries[0]?.currency || 'USD';
 		if (!entries.length || available <= 0) {
 			throw new BadRequestException('No available balance to request yet.');
@@ -239,6 +246,8 @@ export class OrganizerSalesService {
 				sourceEntryIds: entries.map((entry) => entry.id),
 				metadata: {
 					requestedAvailableBalance: available,
+					grossAvailableBalance: grossAvailable,
+					reservedBalance: reserved,
 					sourceEntryCount: entries.length,
 				},
 			}),
@@ -250,6 +259,38 @@ export class OrganizerSalesService {
 			request.id,
 			{ amount, currency, organizationId },
 			{ organizationId, availableBalanceSnapshot: available },
+		);
+		await this.notifyAdmins(
+			'New Venue Spice withdrawal request',
+			{
+				eyebrow: 'Withdrawal request',
+				title: 'New withdrawal request submitted',
+				greeting: 'Hello team,',
+				intro: `${organization.name} requested ${this.formatMoney(amount, currency)} for payout.`,
+				rows: [
+					{ label: 'Organizer', value: organization.name },
+					{ label: 'Amount', value: this.formatMoney(amount, currency) },
+					{ label: 'Requested by', value: user.email || organization.contactEmail || 'Unknown' },
+					{ label: 'Available snapshot', value: this.formatMoney(available, currency) },
+				],
+				action: { label: 'Review withdrawals', url: this.adminUrl('/withdrawals') },
+			},
+		);
+		await this.notifyOrganizer(
+			organization,
+			user.email,
+			'Your Venue Spice withdrawal request was submitted',
+			{
+				eyebrow: 'Withdrawal request',
+				title: 'Withdrawal request received',
+				greeting: `Hello ${organization.name},`,
+				intro: `Your withdrawal request for ${this.formatMoney(amount, currency)} has been submitted for admin review.`,
+				rows: [
+					{ label: 'Amount', value: this.formatMoney(amount, currency) },
+					{ label: 'Status', value: 'Pending review' },
+				],
+				action: { label: 'Open account page', url: this.webUrl('/dashboard/account') },
+			},
 		);
 		return request;
 	}
@@ -280,6 +321,16 @@ export class OrganizerSalesService {
 			{ status: saved.status, amount: Number(saved.amount), currency: saved.currency },
 			{ organizationId: saved.organization?.id },
 		);
+		await this.notifyOrganizer(saved.organization, saved.requestedByEmail, 'Your Venue Spice withdrawal was approved', {
+			eyebrow: 'Withdrawal approved',
+			title: 'Withdrawal request approved',
+			greeting: `Hello ${saved.organization?.name || 'there'},`,
+			intro: `Your withdrawal request for ${this.formatMoney(Number(saved.amount), saved.currency)} has been approved. The team will release it from the admin payout queue.`,
+			rows: [
+				{ label: 'Amount', value: this.formatMoney(Number(saved.amount), saved.currency) },
+				{ label: 'Status', value: 'Approved' },
+			],
+		});
 		return saved;
 	}
 
@@ -302,6 +353,16 @@ export class OrganizerSalesService {
 			{ status: saved.status, amount: Number(saved.amount), currency: saved.currency },
 			{ organizationId: saved.organization?.id, adminNote: saved.adminNote },
 		);
+		await this.notifyOrganizer(saved.organization, saved.requestedByEmail, 'Your Venue Spice withdrawal was rejected', {
+			eyebrow: 'Withdrawal rejected',
+			title: 'Withdrawal request rejected',
+			greeting: `Hello ${saved.organization?.name || 'there'},`,
+			intro: `Your withdrawal request for ${this.formatMoney(Number(saved.amount), saved.currency)} was rejected.`,
+			rows: [
+				{ label: 'Amount', value: this.formatMoney(Number(saved.amount), saved.currency) },
+				{ label: 'Reason', value: saved.adminNote || 'No reason provided' },
+			],
+		});
 		return saved;
 	}
 
@@ -354,6 +415,7 @@ export class OrganizerSalesService {
 			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: 'mock' };
 			const saved = await this.withdrawalRequestsRepository.save(request);
 			await this.auditService.log('organizer_withdrawal.paid', user, 'withdrawal_request', saved.id, { amount, currency }, { organizationId: organization.id, mode: 'mock' });
+			await this.notifyOrganizerPayoutPaid(saved);
 			return saved;
 		}
 
@@ -379,9 +441,11 @@ export class OrganizerSalesService {
 			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: 'stripe_transfer' };
 			const saved = await this.withdrawalRequestsRepository.save(request);
 			await this.auditService.log('organizer_withdrawal.paid', user, 'withdrawal_request', saved.id, { amount, currency }, { organizationId: organization.id, stripeTransferId: transfer.id });
+			await this.notifyOrganizerPayoutPaid(saved);
 			return saved;
 		} catch (error) {
-			const message = error instanceof Error ? error.message : 'Stripe transfer failed.';
+			const stripeMessage = error instanceof Error ? error.message : 'Stripe transfer failed.';
+			const message = this.friendlyStripeTransferError(stripeMessage);
 			await this.ledgerService.recordPayoutFailure(
 				organization.id,
 				entries,
@@ -389,15 +453,63 @@ export class OrganizerSalesService {
 				currency,
 				message,
 				user,
-				{ destination: organization.stripeAccountId, withdrawalRequestId: request.id },
+				{ destination: organization.stripeAccountId, withdrawalRequestId: request.id, stripeErrorMessage: stripeMessage },
 			);
 			request.status = 'failed';
 			request.failedAt = new Date();
-			request.metadata = { ...(request.metadata ?? {}), errorMessage: message };
+			request.adminNote = message;
+			request.metadata = { ...(request.metadata ?? {}), errorMessage: message, stripeErrorMessage: stripeMessage };
 			await this.withdrawalRequestsRepository.save(request);
 			await this.auditService.log('organizer_withdrawal.failed', user, 'withdrawal_request', request.id, { amount, currency, errorMessage: message }, { organizationId: organization.id });
+			await this.notifyAdmins('Venue Spice withdrawal payout failed', {
+				eyebrow: 'Payout failed',
+				title: 'Withdrawal payout failed',
+				greeting: 'Hello team,',
+				intro: `${organization.name}'s withdrawal payout could not be sent.`,
+				rows: [
+					{ label: 'Organizer', value: organization.name },
+					{ label: 'Amount', value: this.formatMoney(amount, currency) },
+					{ label: 'Reason', value: message },
+				],
+				action: { label: 'Review withdrawals', url: this.adminUrl('/withdrawals') },
+			});
+			await this.notifyOrganizer(organization, request.requestedByEmail, 'Your Venue Spice payout is delayed', {
+				eyebrow: 'Payout delayed',
+				title: 'Your payout needs review',
+				greeting: `Hello ${organization.name},`,
+				intro: `Your payout request for ${this.formatMoney(amount, currency)} could not be completed yet. Our team has been notified and will review it.`,
+				rows: [{ label: 'Reason', value: message }],
+			});
 			throw new BadRequestException(message);
 		}
+	}
+
+	async getStripePlatformBalance() {
+		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
+		if (!secretKey) {
+			throw new BadRequestException('Stripe is not configured on this server.');
+		}
+		const response = await fetch('https://api.stripe.com/v1/balance', {
+			headers: { Authorization: `Bearer ${secretKey}` },
+		});
+		const payload = await response.json() as {
+			available?: Array<{ amount: number; currency: string; source_types?: Record<string, number> }>;
+			pending?: Array<{ amount: number; currency: string; source_types?: Record<string, number> }>;
+			error?: { message?: string };
+		};
+		if (!response.ok) {
+			throw new BadRequestException(payload.error?.message ?? 'Unable to fetch Stripe balance.');
+		}
+		const normalize = (items?: Array<{ amount: number; currency: string; source_types?: Record<string, number> }>) =>
+			(items ?? []).map((item) => ({
+				amount: this.roundMoney(Number(item.amount || 0) / 100),
+				currency: String(item.currency || 'usd').toUpperCase(),
+				sourceTypes: item.source_types ?? {},
+			}));
+		return {
+			available: normalize(payload.available),
+			pending: normalize(payload.pending),
+		};
 	}
 
 	async createStripeDashboardLink(organizationId: string, user: SalesUser) {
@@ -436,6 +548,30 @@ export class OrganizerSalesService {
 		const request = await this.withdrawalRequestsRepository.findOne({ where: { id } });
 		if (!request) throw new NotFoundException('Withdrawal request not found');
 		return request;
+	}
+
+	private async getAdjustedBalance(organizationId: string) {
+		const balance = await this.ledgerService.getBalance(organizationId);
+		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const grossAvailable = Number(balance.available || 0);
+		const withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved));
+		return {
+			...balance,
+			grossAvailable: this.roundMoney(grossAvailable),
+			reserved: this.roundMoney(reserved),
+			withdrawable,
+			available: withdrawable,
+		};
+	}
+
+	private async getReservedWithdrawalAmount(organizationId: string) {
+		const requests = await this.withdrawalRequestsRepository.find({
+			where: {
+				organization: { id: organizationId },
+				status: In(['pending_review', 'approved', 'processing']),
+			},
+		});
+		return this.roundMoney(requests.reduce((sum, request) => sum + Number(request.amount || 0), 0));
 	}
 
 	private async createStripeTransfer(accountId: string, amount: number, currency: string, organizationId: string, withdrawalRequestId?: string) {
@@ -697,6 +833,65 @@ export class OrganizerSalesService {
 
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN].includes(role);
+	}
+
+	private friendlyStripeTransferError(message: string) {
+		const lower = message.toLowerCase();
+		if (lower.includes('insufficient funds') || lower.includes('balance is too low')) {
+			return 'Stripe balance is not enough to pay this withdrawal yet. Please fund the Stripe account or wait for pending Stripe balance to become available, then retry payout.';
+		}
+		return message || 'Stripe transfer failed. Please review the payout and try again.';
+	}
+
+	private async notifyAdmins(subject: string, options: Parameters<NotificationsService['buildBrandedEmail']>[0]) {
+		const admins = await this.usersRepository.find({
+			where: { role: In([Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN]), isActive: true },
+		});
+		await Promise.allSettled(
+			admins
+				.map((admin) => admin.email)
+				.filter(Boolean)
+				.map((email) => this.notificationsService.queueEmail(email, subject, this.notificationsService.buildBrandedEmail(options))),
+		);
+	}
+
+	private async notifyOrganizer(
+		organization: OrganizationEntity | undefined,
+		fallbackEmail: string | undefined | null,
+		subject: string,
+		options: Parameters<NotificationsService['buildBrandedEmail']>[0],
+	) {
+		const email = fallbackEmail || organization?.contactEmail || await this.getOrganizationOwnerEmail(organization);
+		if (!email) return;
+		await this.notificationsService.queueEmail(email, subject, this.notificationsService.buildBrandedEmail(options));
+	}
+
+	private async notifyOrganizerPayoutPaid(request: WithdrawalRequestEntity) {
+		await this.notifyOrganizer(request.organization, request.requestedByEmail, 'Your Venue Spice payout has been sent', {
+			eyebrow: 'Payout sent',
+			title: 'Your payout has been sent',
+			greeting: `Hello ${request.organization?.name || 'there'},`,
+			intro: `Your payout of ${this.formatMoney(Number(request.amount), request.currency)} has been sent.`,
+			rows: [
+				{ label: 'Amount', value: this.formatMoney(Number(request.amount), request.currency) },
+				{ label: 'Status', value: 'Paid' },
+				{ label: 'Stripe transfer', value: request.stripeTransferId || 'Processed' },
+			],
+		});
+	}
+
+	private async getOrganizationOwnerEmail(organization?: OrganizationEntity) {
+		if (!organization?.ownerUserId) return null;
+		const owner = await this.usersRepository.findOne({ where: { id: organization.ownerUserId } });
+		return owner?.email || null;
+	}
+
+	private webUrl(path: string) {
+		return `${this.configService.get<string>('FRONTEND_URL', 'https://venuespice.com')}${path}`;
+	}
+
+	private adminUrl(path: string) {
+		return `${this.configService.get<string>('ADMIN_URL', 'https://admin.venuespice.com')}${path}`;
 	}
 
 	private getMinimumWithdrawalAmount() {
