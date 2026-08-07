@@ -9,7 +9,7 @@ import { OrganizerSalesService } from './organizer-sales.service';
 @ApiTags('Organizer Sales')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF)
+@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 @Controller('organizer-sales')
 export class OrganizerSalesController {
 	constructor(private readonly organizerSalesService: OrganizerSalesService) {}
@@ -80,5 +80,13 @@ export class OrganizerSalesController {
 		@Req() req: { user: { id: string; role: Role } },
 	) {
 		return this.organizerSalesService.createStripeDashboardLink(organizationId, req.user);
+	}
+
+	@Post('withdraw')
+	withdraw(
+		@Query('organizationId') organizationId: string,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.organizerSalesService.withdrawAvailableBalance(organizationId, req.user);
 	}
 }

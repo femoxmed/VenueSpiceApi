@@ -13,6 +13,7 @@ export type PricingSettings = {
 	venueSpiceFeeFixed: number;
 	paymentProcessingFeePercent: number;
 	paymentProcessingFeeFixed: number;
+	organizerPayoutHoldDays: number;
 	defaultFeePayer: FeePayer;
 	stripeAutomaticTaxEnabled: boolean;
 	stripeTaxCode: string;
@@ -24,6 +25,7 @@ const settingMap = {
 	venueSpiceFeeFixed: 'VENUE_SPICE_FEE_FIXED',
 	paymentProcessingFeePercent: 'PAYMENT_PROCESSING_FEE_PERCENT',
 	paymentProcessingFeeFixed: 'PAYMENT_PROCESSING_FEE_FIXED',
+	organizerPayoutHoldDays: 'ORGANIZER_PAYOUT_HOLD_DAYS',
 	defaultFeePayer: 'DEFAULT_FEE_PAYER',
 	stripeAutomaticTaxEnabled: 'STRIPE_AUTOMATIC_TAX_ENABLED',
 	stripeTaxCode: 'STRIPE_TAX_CODE',
@@ -35,6 +37,7 @@ const defaults = {
 	venueSpiceFeeFixed: 1.29,
 	paymentProcessingFeePercent: 0.029,
 	paymentProcessingFeeFixed: 0.3,
+	organizerPayoutHoldDays: 3,
 	defaultFeePayer: 'buyer',
 	stripeAutomaticTaxEnabled: true,
 	stripeTaxCode: '',
@@ -46,6 +49,7 @@ const descriptions: Record<string, string> = {
 	VENUE_SPICE_FEE_FIXED: 'Venue Spice fixed service fee per paid ticket.',
 	PAYMENT_PROCESSING_FEE_PERCENT: 'Estimated Stripe/payment processing percentage fee per order. Use decimal format, e.g. 0.029 for 2.9%.',
 	PAYMENT_PROCESSING_FEE_FIXED: 'Estimated Stripe/payment processing fixed fee per order.',
+	ORGANIZER_PAYOUT_HOLD_DAYS: 'Number of days after an event ends before organizer earnings become withdrawable.',
 	DEFAULT_FEE_PAYER: 'Default fee payer for new checkouts. buyer adds fees on top; organizer absorbs fees.',
 	STRIPE_AUTOMATIC_TAX_ENABLED: 'Enable Stripe Automatic Tax for ticket checkout sessions.',
 	STRIPE_TAX_CODE: 'Optional Stripe tax code applied to ticket products, e.g. txcd_*. Leave blank to use Stripe defaults.',
@@ -103,14 +107,22 @@ export class PlatformSettingsService implements OnModuleInit {
 		const byKey = new Map(rows.map((row) => [row.key, row.value]));
 		return {
 			venueSpiceFeePercent: this.numberValue(byKey.get(settingMap.venueSpiceFeePercent), defaults.venueSpiceFeePercent),
-			venueSpiceFeeFixed: this.numberValue(byKey.get(settingMap.venueSpiceFeeFixed), defaults.venueSpiceFeeFixed),
-			paymentProcessingFeePercent: this.numberValue(byKey.get(settingMap.paymentProcessingFeePercent), defaults.paymentProcessingFeePercent),
-			paymentProcessingFeeFixed: this.numberValue(byKey.get(settingMap.paymentProcessingFeeFixed), defaults.paymentProcessingFeeFixed),
-			defaultFeePayer: this.feePayerValue(byKey.get(settingMap.defaultFeePayer), defaults.defaultFeePayer),
+				venueSpiceFeeFixed: this.numberValue(byKey.get(settingMap.venueSpiceFeeFixed), defaults.venueSpiceFeeFixed),
+				paymentProcessingFeePercent: this.numberValue(byKey.get(settingMap.paymentProcessingFeePercent), defaults.paymentProcessingFeePercent),
+				paymentProcessingFeeFixed: this.numberValue(byKey.get(settingMap.paymentProcessingFeeFixed), defaults.paymentProcessingFeeFixed),
+				organizerPayoutHoldDays: this.numberValue(byKey.get(settingMap.organizerPayoutHoldDays), defaults.organizerPayoutHoldDays),
+				defaultFeePayer: this.feePayerValue(byKey.get(settingMap.defaultFeePayer), defaults.defaultFeePayer),
 			stripeAutomaticTaxEnabled: this.booleanValue(byKey.get(settingMap.stripeAutomaticTaxEnabled), defaults.stripeAutomaticTaxEnabled),
 			stripeTaxCode: byKey.get(settingMap.stripeTaxCode) ?? defaults.stripeTaxCode,
 			stripeTaxBehavior: this.taxBehaviorValue(byKey.get(settingMap.stripeTaxBehavior), defaults.stripeTaxBehavior),
 		};
+	}
+
+	async getOrganizerPayoutHoldDays() {
+		const settings = await this.getPricingSettings();
+		return Number.isFinite(settings.organizerPayoutHoldDays) && settings.organizerPayoutHoldDays >= 0
+			? settings.organizerPayoutHoldDays
+			: defaults.organizerPayoutHoldDays;
 	}
 
 	async updatePricingSettings(

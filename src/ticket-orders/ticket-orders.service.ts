@@ -523,16 +523,16 @@ export class TicketOrdersService {
 		params.set('billing_address_collection', 'required');
 		params.set('automatic_tax[enabled]', settings.stripeAutomaticTaxEnabled ? 'true' : 'false');
 		params.set('metadata[ticketOrderId]', order.id);
-		params.set('metadata[eventId]', order.event.id);
-		params.set('metadata[organizationId]', order.organization.id);
-		if (order.organization.stripeAccountId && Number(order.total ?? 0) > 0) {
-			await this.ensureDestinationAccountCanReceiveTransfers(order.organization.stripeAccountId, secretKey);
-			params.set(
-				'payment_intent_data[application_fee_amount]',
-				String(this.calculateApplicationFeeAmount(order)),
-			);
-			params.set('payment_intent_data[transfer_data][destination]', order.organization.stripeAccountId);
-		}
+			params.set('metadata[eventId]', order.event.id);
+			params.set('metadata[organizationId]', order.organization.id);
+			if (order.organization.stripeAccountId && Number(order.total ?? 0) > 0) {
+				await this.ensureDestinationAccountCanReceiveTransfers(order.organization.stripeAccountId, secretKey);
+				this.updateFeeSnapshot(order, {
+					stripePayoutMode: 'platform_hold',
+					stripeDestinationAccountId: order.organization.stripeAccountId,
+					applicationFeeAmount: this.calculateApplicationFeeAmount(order),
+				});
+			}
 		const discount = this.getOrderDiscount(order);
 		if (discount?.amount) {
 			const stripeCouponId = await this.createStripeCheckoutDiscountCoupon(discount, order.currency, secretKey, order.id);

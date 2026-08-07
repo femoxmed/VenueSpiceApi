@@ -131,19 +131,25 @@ export class OrganizerSalesService {
 
 	async ticketDetail(organizationId: string, ticketTypeId: string, user: SalesUser) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const ticketType = await this.ticketTypesRepository.findOne({ where: { id: ticketTypeId } });
-		if (!ticketType || ticketType.event?.organization?.id !== organizationId) {
-			throw new NotFoundException('Ticket not found');
-		}
-		const orders = (await this.getOrders(organizationId))
-			.filter((order) => order.items.some((item) => item.ticketType?.id === ticketTypeId));
+		const orders = await this.getOrders(organizationId);
 		const lines = orders.flatMap((order) =>
 			this.buildOrderLines(order).filter((line) => line.kind === 'ticket' && line.itemId === ticketTypeId),
 		);
+		const ticketType = await this.ticketTypesRepository.findOne({
+			where: { id: ticketTypeId },
+			relations: { event: { organization: true } },
+		});
+		if (!lines.length && (!ticketType || ticketType.event?.organization?.id !== organizationId)) {
+			throw new NotFoundException('Ticket not found');
+		}
+		const matchingOrders = lines.length
+			? orders.filter((order) => lines.some((line) => line.id.split(':')[0] === order.id))
+			: orders.filter((order) => order.items.some((item) => item.ticketType?.id === ticketTypeId));
+		const name = ticketType?.name || lines[0]?.name || 'Ticket';
 		return {
-			ticket: ticketType,
-			summary: this.summarizeLines(lines)[0] ?? this.emptyLineSummary(ticketTypeId, ticketType.name, 'ticket'),
-			orders: orders.map((order) => this.toOrderRow(order)),
+			ticket: ticketType ?? null,
+			summary: this.summarizeLines(lines)[0] ?? this.emptyLineSummary(ticketTypeId, name, 'ticket'),
+			orders: matchingOrders.map((order) => this.toOrderRow(order)),
 			lines,
 		};
 	}
@@ -176,6 +182,81 @@ export class OrganizerSalesService {
 		return this.ledgerService.getBalance(organizationId);
 	}
 
+	async withdrawAvailableBalance(organizationId: string, user: SalesUser) {
+		const organization = await this.ensureOrganizationAccess(organizationId, user);
+		if (!organization.stripeAccountId) {
+			throw new BadRequestException('Connect Stripe before withdrawing available balance.');
+		}
+		if (!organization.stripePayoutsEnabled && !organization.stripeAccountId.startsWith('acct_mock_')) {
+			throw new BadRequestException('Finish Stripe payout setup before withdrawing available balance.');
+		}
+		const entries = await this.ledgerService.getWithdrawableEntries(organizationId);
+		const amount = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+		const currency = entries[0]?.currency || 'USD';
+		if (!entries.length || amount <= 0) {
+			throw new BadRequestException('No available balance to withdraw yet.');
+		}
+
+		if (organization.stripeAccountId.startsWith('acct_mock_')) {
+			const payout = await this.ledgerService.recordPayoutSuccess(
+				organizationId,
+				entries,
+				amount,
+				currency,
+				{
+					mode: 'mock',
+					mockTransferId: `tr_mock_${Date.now()}`,
+					destination: organization.stripeAccountId,
+				},
+				user,
+			);
+			return {
+				status: 'paid_out',
+				mode: 'mock',
+				amount,
+				currency,
+				payout,
+			};
+		}
+
+		try {
+			const transfer = await this.createStripeTransfer(organization.stripeAccountId, amount, currency, organizationId);
+			const payout = await this.ledgerService.recordPayoutSuccess(
+				organizationId,
+				entries,
+				amount,
+				currency,
+				{
+					mode: 'stripe_transfer',
+					stripeTransferId: transfer.id,
+					destination: organization.stripeAccountId,
+					stripePayload: transfer,
+				},
+				user,
+			);
+			return {
+				status: 'paid_out',
+				mode: 'stripe_transfer',
+				amount,
+				currency,
+				stripeTransferId: transfer.id,
+				payout,
+			};
+		} catch (error) {
+			const message = error instanceof Error ? error.message : 'Stripe transfer failed.';
+			await this.ledgerService.recordPayoutFailure(
+				organizationId,
+				entries,
+				amount,
+				currency,
+				message,
+				user,
+				{ destination: organization.stripeAccountId },
+			);
+			throw new BadRequestException(message);
+		}
+	}
+
 	async createStripeDashboardLink(organizationId: string, user: SalesUser) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		if (!organization.stripeAccountId) {
@@ -206,6 +287,33 @@ export class OrganizerSalesService {
 			throw new BadRequestException(payload.error?.message ?? 'Unable to create Stripe dashboard link.');
 		}
 		return { url: payload.url, mode: 'live' };
+	}
+
+	private async createStripeTransfer(accountId: string, amount: number, currency: string, organizationId: string) {
+		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
+		if (!secretKey) {
+			throw new BadRequestException('Stripe is not configured on this server.');
+		}
+		const params = new URLSearchParams();
+		params.set('amount', String(Math.round(amount * 100)));
+		params.set('currency', currency.toLowerCase());
+		params.set('destination', accountId);
+		params.set('metadata[organizationId]', organizationId);
+		params.set('metadata[source]', 'venue_spice_organizer_withdrawal');
+
+		const response = await fetch('https://api.stripe.com/v1/transfers', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${secretKey}`,
+				'Content-Type': 'application/x-www-form-urlencoded',
+			},
+			body: params,
+		});
+		const payload = await response.json() as { id?: string; error?: { message?: string } };
+		if (!response.ok || !payload.id) {
+			throw new BadRequestException(payload.error?.message ?? 'Unable to transfer available balance.');
+		}
+		return payload;
 	}
 
 	private async getOrders(organizationId: string) {

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bullmq';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule } from './auth/auth.module';
 
 import { ProductsModule } from './products/products.module';
@@ -88,8 +89,9 @@ function getBullQueuePrefix(value?: string | null) {
 
 @Module({
 	imports: [
-		ConfigModule.forRoot({ isGlobal: true }),
-		TypeOrmModule.forRootAsync({
+			ConfigModule.forRoot({ isGlobal: true }),
+			ScheduleModule.forRoot(),
+			TypeOrmModule.forRootAsync({
 			imports: [ConfigModule],
 			inject: [ConfigService],
 			useFactory: (configService: ConfigService) => ({

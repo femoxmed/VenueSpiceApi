@@ -22,6 +22,11 @@ export class UpdatePlatformSettingsDto {
 	paymentProcessingFeeFixed?: number;
 
 	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	organizerPayoutHoldDays?: number;
+
+	@IsOptional()
 	@IsIn(['buyer', 'organizer'])
 	defaultFeePayer?: 'buyer' | 'organizer';
 

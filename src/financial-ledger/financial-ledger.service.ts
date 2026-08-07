@@ -1,6 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThanOrEqual, Repository } from 'typeorm';
+import { In, LessThanOrEqual, Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import {
 	FinancialLedgerEntryEntity,
@@ -10,11 +13,15 @@ import {
 
 @Injectable()
 export class FinancialLedgerService {
+	private readonly logger = new Logger(FinancialLedgerService.name);
+
 	constructor(
 		@InjectRepository(FinancialLedgerEntryEntity)
 		private readonly ledgerRepository: Repository<FinancialLedgerEntryEntity>,
 		@InjectRepository(TicketOrderEntity)
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
+		private readonly platformSettingsService: PlatformSettingsService,
+		private readonly auditService: AuditService,
 	) {}
 
 	async syncOrganizationOrders(organizationId: string) {
@@ -32,36 +39,52 @@ export class FinancialLedgerService {
 	async syncOrder(order: TicketOrderEntity) {
 		if (!['paid', 'refunded'].includes(order.status)) return;
 
-		const availableAt = this.calculateAvailableAt(order);
+		const availableAt = await this.calculateAvailableAt(order);
 		const status: FinancialLedgerEntryStatus = availableAt.getTime() <= Date.now()
 			? 'available'
 			: 'pending';
+		const payoutMode = this.feeSnapshotString(order, 'stripePayoutMode') || this.inferPayoutMode(order);
+		const payoutEligible = payoutMode !== 'legacy_destination_charge';
+		const organizerNetStatus: FinancialLedgerEntryStatus = payoutEligible ? status : 'paid_out';
+		const organizerNetAvailableAt = payoutEligible ? availableAt : order.paidAt || order.createdAt || new Date();
 
 		const entries: Array<{
 			type: FinancialLedgerEntryType;
 			amount: number;
 			status: FinancialLedgerEntryStatus;
+			availableAt?: Date;
 			metadata?: Record<string, unknown>;
 		}> = [
-			{ type: 'gross_sale', amount: Number(order.subtotal || 0), status },
-			{ type: 'tax', amount: Number(order.tax || 0), status },
-			{ type: 'platform_fee', amount: -Number(order.platformFee || 0), status },
-			{ type: 'processing_fee', amount: -Number(order.processingFee || 0), status },
+			{ type: 'gross_sale', amount: Number(order.subtotal || 0), status, metadata: { payoutMode } },
+			{ type: 'tax', amount: Number(order.tax || 0), status, metadata: { payoutMode } },
+			{ type: 'platform_fee', amount: -Number(order.platformFee || 0), status, metadata: { payoutMode } },
+			{ type: 'processing_fee', amount: -Number(order.processingFee || 0), status, metadata: { payoutMode } },
 			{
 				type: 'influencer_commission',
 				amount: -this.feeSnapshotNumber(order, 'influencerCommission', 0),
 				status,
 				metadata: {
+					payoutMode,
 					referralCode: order.referralCode?.code ?? null,
 					agentId: order.referralCode?.agent?.id ?? null,
 				},
 			},
-			{ type: 'organizer_net', amount: Number(order.organizerNet || 0), status },
+			{
+				type: 'organizer_net',
+				amount: Number(order.organizerNet || 0),
+				status: organizerNetStatus,
+				availableAt: organizerNetAvailableAt,
+				metadata: {
+					payoutMode,
+					payoutEligible,
+					paidOutAutomaticallyByStripe: !payoutEligible,
+				},
+			},
 		];
 
 		for (const entry of entries) {
 			if (Math.abs(entry.amount) <= 0) continue;
-			await this.upsertOrderEntry(order, entry.type, entry.amount, entry.status, availableAt, entry.metadata);
+			await this.upsertOrderEntry(order, entry.type, entry.amount, entry.status, entry.availableAt ?? availableAt, entry.metadata);
 		}
 
 		if (order.status === 'refunded') {
@@ -103,7 +126,7 @@ export class FinancialLedgerService {
 			organizerEntries.filter((entry) => entry.status === 'available'),
 		);
 		const paidOut = Math.abs(this.sum(
-			organizerEntries.filter((entry) => entry.status === 'paid_out' || entry.type === 'payout'),
+			organizerEntries.filter((entry) => entry.status === 'paid_out'),
 		));
 		const reversed = Math.abs(this.sum(
 			organizerEntries.filter((entry) => entry.status === 'reversed' || entry.type === 'refund'),
@@ -116,8 +139,120 @@ export class FinancialLedgerService {
 			paidOut: this.roundMoney(paidOut),
 			reversed: this.roundMoney(reversed),
 			totalEarned: this.roundMoney(pending + available + paidOut),
-			entries,
+				entries,
 		};
+	}
+
+	async getWithdrawableEntries(organizationId: string) {
+		await this.syncOrganizationOrders(organizationId);
+		return this.ledgerRepository.find({
+			where: {
+				organization: { id: organizationId },
+				type: 'organizer_net',
+				status: 'available',
+			},
+			order: { availableAt: 'ASC', createdAt: 'ASC' },
+		});
+	}
+
+	async recordPayoutSuccess(
+		organizationId: string,
+		entries: FinancialLedgerEntryEntity[],
+		amount: number,
+		currency: string,
+		metadata: Record<string, unknown>,
+		actor?: { id?: string; email?: string; role?: string },
+	) {
+		if (!entries.length || amount <= 0) return null;
+		const now = new Date();
+		const ids = entries.map((entry) => entry.id);
+		await this.ledgerRepository
+			.createQueryBuilder()
+			.update(FinancialLedgerEntryEntity)
+			.set({
+				status: 'paid_out',
+				paidOutAt: now,
+				metadata: () => "COALESCE(metadata, '{}'::jsonb) || '{\"paidOutByWithdrawal\": true}'::jsonb",
+			})
+			.whereInIds(ids)
+			.execute();
+		const payoutEntry = await this.ledgerRepository.save(
+			this.ledgerRepository.create({
+				idempotencyKey: `organizer-payout:${organizationId}:${String(metadata.stripeTransferId || metadata.mockTransferId || Date.now())}`,
+				organization: entries[0].organization,
+				type: 'payout',
+				status: 'paid_out',
+				amount: -this.roundMoney(amount),
+				currency,
+				paidOutAt: now,
+				availableAt: now,
+				metadata: {
+					...metadata,
+					sourceEntryIds: ids,
+				},
+			}),
+		);
+		await this.auditService.log(
+			'organizer_payout.paid_out',
+			actor,
+			'organization',
+			organizationId,
+			{ amount: this.roundMoney(amount), currency, sourceEntryIds: ids },
+			metadata,
+		);
+		return payoutEntry;
+	}
+
+	async recordPayoutFailure(
+		organizationId: string,
+		entries: FinancialLedgerEntryEntity[],
+		amount: number,
+		currency: string,
+		errorMessage: string,
+		actor?: { id?: string; email?: string; role?: string },
+		metadata?: Record<string, unknown>,
+	) {
+		const now = new Date();
+		const failed = await this.ledgerRepository.save(
+			this.ledgerRepository.create({
+				idempotencyKey: `organizer-payout-failed:${organizationId}:${Date.now()}`,
+				organization: entries[0]?.organization,
+				type: 'payout',
+				status: 'failed',
+				amount: -this.roundMoney(amount),
+				currency,
+				availableAt: now,
+				metadata: {
+					...(metadata ?? {}),
+					errorMessage,
+					sourceEntryIds: entries.map((entry) => entry.id),
+				},
+			}),
+		);
+		await this.auditService.log(
+			'organizer_payout.failed',
+			actor,
+			'organization',
+			organizationId,
+			{ amount: this.roundMoney(amount), currency, errorMessage },
+			metadata,
+		);
+		return failed;
+	}
+
+	@Cron('0 * * * *')
+	async releaseMaturedEntriesJob() {
+		const result = await this.releaseAvailableEntries();
+		if (result.affected) {
+			this.logger.log(`Released ${result.affected} matured organizer ledger entries`);
+			await this.auditService.log(
+				'financial_ledger.entries_matured',
+				{ role: 'system' },
+				'financial_ledger',
+				'maturity-job',
+				{ affected: result.affected },
+			);
+		}
 	}
 
 	private async upsertOrderEntry(
@@ -160,10 +295,10 @@ export class FinancialLedgerService {
 		);
 	}
 
-	private async releaseAvailableEntries(organizationId: string) {
-		await this.ledgerRepository.update(
+	private async releaseAvailableEntries(organizationId?: string) {
+		return this.ledgerRepository.update(
 			{
-				organization: { id: organizationId },
+				...(organizationId ? { organization: { id: organizationId } } : {}),
 				status: 'pending',
 				availableAt: LessThanOrEqual(new Date()),
 			},
@@ -171,8 +306,11 @@ export class FinancialLedgerService {
 		);
 	}
 
-	private calculateAvailableAt(order: TicketOrderEntity) {
-		const holdDays = this.getHoldDays();
+	private async calculateAvailableAt(order: TicketOrderEntity) {
+		const holdDays = await this.getHoldDays();
+		if (holdDays <= 0) {
+			return new Date(order.paidAt || order.createdAt || new Date());
+		}
 		const base = order.event?.endsAt || order.event?.startsAt || order.paidAt || order.createdAt || new Date();
 		const date = new Date(base);
 		if (Number.isNaN(date.getTime())) return new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000);
@@ -180,15 +318,27 @@ export class FinancialLedgerService {
 		return date;
 	}
 
-	private getHoldDays() {
-		const raw = Number(process.env.ORGANIZER_PAYOUT_HOLD_DAYS ?? process.env.INFLUENCER_EARNINGS_HOLD_DAYS ?? 7);
-		return Number.isFinite(raw) && raw >= 0 ? raw : 7;
+	private async getHoldDays() {
+		const raw = await this.platformSettingsService.getOrganizerPayoutHoldDays();
+		return Number.isFinite(raw) && raw >= 0 ? raw : 3;
 	}
 
 	private feeSnapshotNumber(order: TicketOrderEntity, key: string, fallback: number) {
 		const value = order.feeSnapshot?.[key];
 		const numeric = Number(value);
 		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	private feeSnapshotString(order: TicketOrderEntity, key: string) {
+		const value = order.feeSnapshot?.[key];
+		return typeof value === 'string' ? value : '';
+	}
+
+	private inferPayoutMode(order: TicketOrderEntity) {
+		if (order.stripePaymentIntentId || order.stripeCheckoutSessionId?.startsWith('cs_')) {
+			return 'legacy_destination_charge';
+		}
+		return 'platform_hold';
 	}
 
 	private sum(entries: FinancialLedgerEntryEntity[]) {

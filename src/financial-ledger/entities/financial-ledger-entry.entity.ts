@@ -24,6 +24,7 @@ export type FinancialLedgerEntryType =
 export type FinancialLedgerEntryStatus =
 	| 'pending'
 	| 'available'
+	| 'failed'
 	| 'paid_out'
 	| 'reversed';
 
