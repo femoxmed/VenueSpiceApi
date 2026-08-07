@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
@@ -74,6 +74,23 @@ export class OrganizerSalesController {
 		return this.organizerSalesService.balance(organizationId, req.user);
 	}
 
+	@Get('withdrawal-requests')
+	withdrawalRequests(
+		@Query('organizationId') organizationId: string,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.listWithdrawalRequests(organizationId, req.user);
+	}
+
+	@Post('withdrawal-requests')
+	requestWithdrawal(
+		@Query('organizationId') organizationId: string,
+		@Body() body: { amount?: number; note?: string },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.requestWithdrawal(organizationId, req.user, body);
+	}
+
 	@Post('stripe-dashboard-link')
 	stripeDashboardLink(
 		@Query('organizationId') organizationId: string,
@@ -85,8 +102,44 @@ export class OrganizerSalesController {
 	@Post('withdraw')
 	withdraw(
 		@Query('organizationId') organizationId: string,
-		@Req() req: { user: { id: string; role: Role } },
+		@Body() body: { amount?: number; note?: string },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.organizerSalesService.withdrawAvailableBalance(organizationId, req.user);
+		return this.organizerSalesService.requestWithdrawal(organizationId, req.user, body);
+	}
+
+	@Get('admin/withdrawal-requests')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	adminWithdrawalRequests(@Query('status') status?: string) {
+		return this.organizerSalesService.listAdminWithdrawalRequests(status);
+	}
+
+	@Patch('admin/withdrawal-requests/:id/approve')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	approveWithdrawalRequest(
+		@Param('id') id: string,
+		@Body() body: { note?: string },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.approveWithdrawalRequest(id, req.user, body);
+	}
+
+	@Patch('admin/withdrawal-requests/:id/reject')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	rejectWithdrawalRequest(
+		@Param('id') id: string,
+		@Body() body: { note?: string },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.rejectWithdrawalRequest(id, req.user, body);
+	}
+
+	@Post('admin/withdrawal-requests/:id/pay')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	payWithdrawalRequest(
+		@Param('id') id: string,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.payWithdrawalRequest(id, req.user);
 	}
 }

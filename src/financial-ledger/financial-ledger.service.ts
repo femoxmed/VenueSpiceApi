@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, LessThanOrEqual, Repository } from 'typeorm';
+import { LessThanOrEqual, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
@@ -116,20 +116,26 @@ export class FinancialLedgerService {
 
 	async getBalance(organizationId: string) {
 		const entries = await this.getOrganizationEntries(organizationId);
-		const organizerEntries = entries.filter((entry) =>
-			['organizer_net', 'refund', 'payout'].includes(entry.type),
-		);
+		const organizerEntries = entries.filter((entry) => entry.type === 'organizer_net');
+		const payoutEntries = entries.filter((entry) => entry.type === 'payout');
 		const pending = this.sum(
 			organizerEntries.filter((entry) => entry.status === 'pending'),
 		);
 		const available = this.sum(
 			organizerEntries.filter((entry) => entry.status === 'available'),
 		);
-		const paidOut = Math.abs(this.sum(
-			organizerEntries.filter((entry) => entry.status === 'paid_out'),
+		const legacyPaidOut = this.sum(
+			organizerEntries.filter((entry) => {
+				const metadata = entry.metadata ?? {};
+				return entry.status === 'paid_out' && metadata.paidOutAutomaticallyByStripe === true;
+			}),
+		);
+		const recordedPayouts = Math.abs(this.sum(
+			payoutEntries.filter((entry) => entry.status === 'paid_out'),
 		));
+		const paidOut = legacyPaidOut + recordedPayouts;
 		const reversed = Math.abs(this.sum(
-			organizerEntries.filter((entry) => entry.status === 'reversed' || entry.type === 'refund'),
+			entries.filter((entry) => entry.status === 'reversed' || entry.type === 'refund'),
 		));
 
 		return {
@@ -139,7 +145,7 @@ export class FinancialLedgerService {
 			paidOut: this.roundMoney(paidOut),
 			reversed: this.roundMoney(reversed),
 			totalEarned: this.roundMoney(pending + available + paidOut),
-				entries,
+			entries,
 		};
 	}
 
@@ -153,6 +159,64 @@ export class FinancialLedgerService {
 			},
 			order: { availableAt: 'ASC', createdAt: 'ASC' },
 		});
+	}
+
+	async prepareWithdrawableEntries(organizationId: string, requestedAmount: number, preferredEntryIds?: string[]) {
+		const amount = this.roundMoney(requestedAmount);
+		if (amount <= 0) return [];
+		const entries = await this.getWithdrawableEntries(organizationId);
+		const preferred = new Set(preferredEntryIds ?? []);
+		const ordered = preferred.size
+			? [
+					...entries.filter((entry) => preferred.has(entry.id)),
+					...entries.filter((entry) => !preferred.has(entry.id)),
+				]
+			: entries;
+		const available = this.roundMoney(ordered.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+		if (available < amount) return [];
+
+		const selected: FinancialLedgerEntryEntity[] = [];
+		let remaining = amount;
+		for (const entry of ordered) {
+			if (remaining <= 0) break;
+			const entryAmount = this.roundMoney(Number(entry.amount || 0));
+			if (entryAmount <= 0) continue;
+			if (entryAmount <= remaining + 0.0001) {
+				selected.push(entry);
+				remaining = this.roundMoney(remaining - entryAmount);
+				continue;
+			}
+
+			const splitAmount = remaining;
+			entry.amount = this.roundMoney(entryAmount - splitAmount);
+			entry.metadata = {
+				...(entry.metadata ?? {}),
+				splitForWithdrawalAmount: splitAmount,
+			};
+			await this.ledgerRepository.save(entry);
+			const splitEntry = await this.ledgerRepository.save(
+				this.ledgerRepository.create({
+					idempotencyKey: `ledger-split:${entry.id}:${Date.now()}`,
+					organization: entry.organization,
+					event: entry.event,
+					order: entry.order,
+					type: entry.type,
+					status: entry.status,
+					amount: splitAmount,
+					currency: entry.currency,
+					availableAt: entry.availableAt,
+					metadata: {
+						...(entry.metadata ?? {}),
+						splitFromEntryId: entry.id,
+						splitReason: 'withdrawal_request',
+					},
+				}),
+			);
+			selected.push(splitEntry);
+			remaining = 0;
+		}
+
+		return this.roundMoney(remaining) <= 0 ? selected : [];
 	}
 
 	async recordPayoutSuccess(

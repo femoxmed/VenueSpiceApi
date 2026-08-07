@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
 import { Role } from '../common/enums/role.enum';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
@@ -9,8 +10,9 @@ import { OrganizationMemberEntity } from '../organizations/entities/organization
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { TicketOrderItemEntity } from '../ticket-orders/entities/ticket-order-item.entity';
+import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 
-type SalesUser = { id: string; role: Role };
+type SalesUser = { id: string; email?: string; role: Role };
 
 type SalesLine = {
 	id: string;
@@ -39,8 +41,11 @@ export class OrganizerSalesService {
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
 		@InjectRepository(TicketTypeEntity)
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
+		@InjectRepository(WithdrawalRequestEntity)
+		private readonly withdrawalRequestsRepository: Repository<WithdrawalRequestEntity>,
 		private readonly ledgerService: FinancialLedgerService,
 		private readonly configService: ConfigService,
+		private readonly auditService: AuditService,
 	) {}
 
 	async summary(organizationId: string, user: SalesUser) {
@@ -182,24 +187,157 @@ export class OrganizerSalesService {
 		return this.ledgerService.getBalance(organizationId);
 	}
 
-	async withdrawAvailableBalance(organizationId: string, user: SalesUser) {
+	async listWithdrawalRequests(organizationId: string, user: SalesUser) {
+		await this.ensureOrganizationAccess(organizationId, user);
+		return this.withdrawalRequestsRepository.find({
+			where: { organization: { id: organizationId } },
+			order: { createdAt: 'DESC' },
+		});
+	}
+
+	async requestWithdrawal(
+		organizationId: string,
+		user: SalesUser,
+		payload?: { amount?: number; note?: string },
+	) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		if (!organization.stripeAccountId) {
-			throw new BadRequestException('Connect Stripe before withdrawing available balance.');
+			throw new BadRequestException('Connect Stripe before requesting a withdrawal.');
 		}
 		if (!organization.stripePayoutsEnabled && !organization.stripeAccountId.startsWith('acct_mock_')) {
-			throw new BadRequestException('Finish Stripe payout setup before withdrawing available balance.');
+			throw new BadRequestException('Finish Stripe payout setup before requesting a withdrawal.');
 		}
 		const entries = await this.ledgerService.getWithdrawableEntries(organizationId);
-		const amount = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+		const available = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
 		const currency = entries[0]?.currency || 'USD';
-		if (!entries.length || amount <= 0) {
-			throw new BadRequestException('No available balance to withdraw yet.');
+		if (!entries.length || available <= 0) {
+			throw new BadRequestException('No available balance to request yet.');
 		}
+		const amount = this.roundMoney(Number(payload?.amount || available));
+		if (!Number.isFinite(amount) || amount <= 0) {
+			throw new BadRequestException('Withdrawal amount must be greater than zero.');
+		}
+		if (amount > available) {
+			throw new BadRequestException('Withdrawal amount cannot exceed the available balance.');
+		}
+		const minimum = this.getMinimumWithdrawalAmount();
+		if (amount < minimum) {
+			throw new BadRequestException(`Minimum withdrawal amount is ${this.formatMoney(minimum, currency)}.`);
+		}
+
+		const request = await this.withdrawalRequestsRepository.save(
+			this.withdrawalRequestsRepository.create({
+				organization,
+				status: 'pending_review',
+				amount,
+				currency,
+				availableBalanceSnapshot: available,
+				stripeAccountId: organization.stripeAccountId,
+				requestedByUserId: user.id,
+				requestedByEmail: user.email,
+				requesterNote: payload?.note?.trim() || null,
+				sourceEntryIds: entries.map((entry) => entry.id),
+				metadata: {
+					requestedAvailableBalance: available,
+					sourceEntryCount: entries.length,
+				},
+			}),
+		);
+		await this.auditService.log(
+			'organizer_withdrawal.requested',
+			user,
+			'withdrawal_request',
+			request.id,
+			{ amount, currency, organizationId },
+			{ organizationId, availableBalanceSnapshot: available },
+		);
+		return request;
+	}
+
+	async listAdminWithdrawalRequests(status?: string) {
+		return this.withdrawalRequestsRepository.find({
+			where: status ? { status: status as never } : {},
+			order: { createdAt: 'DESC' },
+		});
+	}
+
+	async approveWithdrawalRequest(id: string, user: SalesUser, payload?: { note?: string }) {
+		const request = await this.findWithdrawalRequest(id);
+		if (!['pending_review', 'failed'].includes(request.status)) {
+			throw new BadRequestException('Only pending or failed withdrawal requests can be approved.');
+		}
+		request.status = 'approved';
+		request.reviewedByUserId = user.id;
+		request.reviewedByEmail = user.email;
+		request.reviewedAt = new Date();
+		request.adminNote = payload?.note?.trim() || request.adminNote || null;
+		const saved = await this.withdrawalRequestsRepository.save(request);
+		await this.auditService.log(
+			'organizer_withdrawal.approved',
+			user,
+			'withdrawal_request',
+			saved.id,
+			{ status: saved.status, amount: Number(saved.amount), currency: saved.currency },
+			{ organizationId: saved.organization?.id },
+		);
+		return saved;
+	}
+
+	async rejectWithdrawalRequest(id: string, user: SalesUser, payload?: { note?: string }) {
+		const request = await this.findWithdrawalRequest(id);
+		if (!['pending_review', 'approved', 'failed'].includes(request.status)) {
+			throw new BadRequestException('This withdrawal request can no longer be rejected.');
+		}
+		request.status = 'rejected';
+		request.reviewedByUserId = user.id;
+		request.reviewedByEmail = user.email;
+		request.reviewedAt = new Date();
+		request.adminNote = payload?.note?.trim() || request.adminNote || null;
+		const saved = await this.withdrawalRequestsRepository.save(request);
+		await this.auditService.log(
+			'organizer_withdrawal.rejected',
+			user,
+			'withdrawal_request',
+			saved.id,
+			{ status: saved.status, amount: Number(saved.amount), currency: saved.currency },
+			{ organizationId: saved.organization?.id, adminNote: saved.adminNote },
+		);
+		return saved;
+	}
+
+	async payWithdrawalRequest(id: string, user: SalesUser) {
+		const request = await this.findWithdrawalRequest(id);
+		if (!['pending_review', 'approved', 'failed'].includes(request.status)) {
+			throw new BadRequestException('This withdrawal request is not payable.');
+		}
+		const organization = request.organization;
+		if (!organization?.stripeAccountId) {
+			throw new BadRequestException('Organizer Stripe account is missing.');
+		}
+		if (!organization.stripePayoutsEnabled && !organization.stripeAccountId.startsWith('acct_mock_')) {
+			throw new BadRequestException('Organizer Stripe payout setup is not complete.');
+		}
+		const amount = this.roundMoney(Number(request.amount || 0));
+		const currency = request.currency || 'USD';
+		const entries = await this.ledgerService.prepareWithdrawableEntries(
+			organization.id,
+			amount,
+			request.sourceEntryIds ?? undefined,
+		);
+		if (!entries.length) {
+			throw new BadRequestException('Available ledger balance is no longer enough to pay this request.');
+		}
+
+		request.status = 'processing';
+		request.reviewedByUserId = user.id;
+		request.reviewedByEmail = user.email;
+		request.reviewedAt = request.reviewedAt ?? new Date();
+		request.sourceEntryIds = entries.map((entry) => entry.id);
+		await this.withdrawalRequestsRepository.save(request);
 
 		if (organization.stripeAccountId.startsWith('acct_mock_')) {
 			const payout = await this.ledgerService.recordPayoutSuccess(
-				organizationId,
+				organization.id,
 				entries,
 				amount,
 				currency,
@@ -207,22 +345,22 @@ export class OrganizerSalesService {
 					mode: 'mock',
 					mockTransferId: `tr_mock_${Date.now()}`,
 					destination: organization.stripeAccountId,
+					withdrawalRequestId: request.id,
 				},
 				user,
 			);
-			return {
-				status: 'paid_out',
-				mode: 'mock',
-				amount,
-				currency,
-				payout,
-			};
+			request.status = 'paid';
+			request.paidAt = new Date();
+			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: 'mock' };
+			const saved = await this.withdrawalRequestsRepository.save(request);
+			await this.auditService.log('organizer_withdrawal.paid', user, 'withdrawal_request', saved.id, { amount, currency }, { organizationId: organization.id, mode: 'mock' });
+			return saved;
 		}
 
 		try {
-			const transfer = await this.createStripeTransfer(organization.stripeAccountId, amount, currency, organizationId);
+			const transfer = await this.createStripeTransfer(organization.stripeAccountId, amount, currency, organization.id, request.id);
 			const payout = await this.ledgerService.recordPayoutSuccess(
-				organizationId,
+				organization.id,
 				entries,
 				amount,
 				currency,
@@ -231,28 +369,33 @@ export class OrganizerSalesService {
 					stripeTransferId: transfer.id,
 					destination: organization.stripeAccountId,
 					stripePayload: transfer,
+					withdrawalRequestId: request.id,
 				},
 				user,
 			);
-			return {
-				status: 'paid_out',
-				mode: 'stripe_transfer',
-				amount,
-				currency,
-				stripeTransferId: transfer.id,
-				payout,
-			};
+			request.status = 'paid';
+			request.paidAt = new Date();
+			request.stripeTransferId = transfer.id;
+			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: 'stripe_transfer' };
+			const saved = await this.withdrawalRequestsRepository.save(request);
+			await this.auditService.log('organizer_withdrawal.paid', user, 'withdrawal_request', saved.id, { amount, currency }, { organizationId: organization.id, stripeTransferId: transfer.id });
+			return saved;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : 'Stripe transfer failed.';
 			await this.ledgerService.recordPayoutFailure(
-				organizationId,
+				organization.id,
 				entries,
 				amount,
 				currency,
 				message,
 				user,
-				{ destination: organization.stripeAccountId },
+				{ destination: organization.stripeAccountId, withdrawalRequestId: request.id },
 			);
+			request.status = 'failed';
+			request.failedAt = new Date();
+			request.metadata = { ...(request.metadata ?? {}), errorMessage: message };
+			await this.withdrawalRequestsRepository.save(request);
+			await this.auditService.log('organizer_withdrawal.failed', user, 'withdrawal_request', request.id, { amount, currency, errorMessage: message }, { organizationId: organization.id });
 			throw new BadRequestException(message);
 		}
 	}
@@ -289,7 +432,13 @@ export class OrganizerSalesService {
 		return { url: payload.url, mode: 'live' };
 	}
 
-	private async createStripeTransfer(accountId: string, amount: number, currency: string, organizationId: string) {
+	private async findWithdrawalRequest(id: string) {
+		const request = await this.withdrawalRequestsRepository.findOne({ where: { id } });
+		if (!request) throw new NotFoundException('Withdrawal request not found');
+		return request;
+	}
+
+	private async createStripeTransfer(accountId: string, amount: number, currency: string, organizationId: string, withdrawalRequestId?: string) {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
 		if (!secretKey) {
 			throw new BadRequestException('Stripe is not configured on this server.');
@@ -300,6 +449,7 @@ export class OrganizerSalesService {
 		params.set('destination', accountId);
 		params.set('metadata[organizationId]', organizationId);
 		params.set('metadata[source]', 'venue_spice_organizer_withdrawal');
+		if (withdrawalRequestId) params.set('metadata[withdrawalRequestId]', withdrawalRequestId);
 
 		const response = await fetch('https://api.stripe.com/v1/transfers', {
 			method: 'POST',
@@ -547,6 +697,15 @@ export class OrganizerSalesService {
 
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN].includes(role);
+	}
+
+	private getMinimumWithdrawalAmount() {
+		const value = Number(this.configService.get<string>('MIN_WITHDRAWAL_AMOUNT', '10'));
+		return Number.isFinite(value) && value > 0 ? this.roundMoney(value) : 10;
+	}
+
+	private formatMoney(amount: number, currency: string) {
+		return `${currency.toUpperCase()} ${this.roundMoney(amount).toFixed(2)}`;
 	}
 
 	private emptySummary() {

@@ -69,6 +69,7 @@ import { VendorCatalogueItemEntity } from './vendor-catalogue/entities/vendor-ca
 import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
 import { PlatformSettingEntity } from './platform-settings/entities/platform-setting.entity';
 import { FinancialLedgerEntryEntity } from './financial-ledger/entities/financial-ledger-entry.entity';
+import { WithdrawalRequestEntity } from './organizer-sales/entities/withdrawal-request.entity';
 import { DatabaseModule } from './database/database.module';
 
 function isEnabled(value?: string | boolean | number | null) {
@@ -149,6 +150,7 @@ function getBullQueuePrefix(value?: string | null) {
 					RefundRequestEntity,
 					PlatformSettingEntity,
 					FinancialLedgerEntryEntity,
+					WithdrawalRequestEntity,
 				],
 			}),
 		}),
