@@ -40,6 +40,13 @@ type StripeCheckoutSession = {
 	};
 };
 
+type StripeCoupon = {
+	id?: string;
+	error?: {
+		message?: string;
+	};
+};
+
 type StripeConnectedAccount = {
 	id: string;
 	charges_enabled?: boolean;
@@ -78,6 +85,17 @@ type PreparedCheckoutAddOn = {
 	unitPrice: number;
 	lineTotal: number;
 	feePayer: 'buyer' | 'organizer';
+};
+
+type PreparedCheckoutDiscount = {
+	coupon?: DiscountCouponEntity;
+	code: string;
+	type: 'percentage' | 'fixed';
+	value: number;
+	amount: number;
+	influencerCommissionPercent: number;
+	influencerCommission: number;
+	stripeCouponId?: string | null;
 };
 
 @Injectable()
@@ -176,7 +194,7 @@ export class TicketOrdersService {
 		if (!dto.termsAccepted) {
 			throw new BadRequestException('Accept the checkout terms to continue.');
 		}
-		const { event, referralCode, items: preparedItems } = await this.prepareCheckout(dto);
+		const { event, referralCode, discount, items: preparedItems } = await this.prepareCheckout(dto);
 		const ticketItems = preparedItems.filter((item) => item.kind === 'ticket' && item.ticketType);
 		const addOns = preparedItems
 			.filter((item) => item.kind === 'add_on')
@@ -200,9 +218,8 @@ export class TicketOrdersService {
 			}),
 		);
 
-		const subtotal = this.roundMoney(preparedItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
 		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
-		const feeEstimate = await this.calculateCheckoutFees(preparedItems);
+		const feeEstimate = await this.calculateCheckoutFees(preparedItems, discount);
 		const order = await this.ticketOrdersRepository.save(
 			this.ticketOrdersRepository.create({
 				event,
@@ -216,8 +233,8 @@ export class TicketOrdersService {
 				privacyVersion: '2024-07-13',
 				refundPolicyVersion: '2026-08-03',
 				pricingPolicyVersion: '2026-08-04',
-				status: 'pending',
-				subtotal,
+					status: 'pending',
+					subtotal: feeEstimate.subtotal,
 				tax: 0,
 				platformFee: feeEstimate.platformFee,
 				processingFee: feeEstimate.processingFee,
@@ -229,6 +246,7 @@ export class TicketOrdersService {
 				processingFeeFixed: feeEstimate.processingFeeFixed,
 				feeSnapshot: {
 					...feeEstimate,
+					discount: this.toDiscountSnapshot(discount, feeEstimate.influencerCommission),
 					addOns,
 				},
 				total: feeEstimate.total,
@@ -253,10 +271,9 @@ export class TicketOrdersService {
 	}
 
 	async previewCheckoutFees(dto: PreviewCheckoutFeesDto) {
-		const { event, items } = await this.prepareCheckout(dto);
-		const subtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const { event, discount, items } = await this.prepareCheckout(dto);
 		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
-		const feeEstimate = await this.calculateCheckoutFees(items);
+		const feeEstimate = await this.calculateCheckoutFees(items, discount);
 
 		return {
 			eventId: event.id,
@@ -297,14 +314,12 @@ export class TicketOrdersService {
 			throw new BadRequestException('One or more ticket types are invalid');
 		}
 
-		const referralCode = dto.referralCode
+		const normalizedReferralCode = dto.referralCode?.trim().toUpperCase();
+		let referralCode = normalizedReferralCode
 			? await this.referralCodesRepository.findOne({
-					where: { code: dto.referralCode },
+					where: { code: normalizedReferralCode },
 			  })
 			: null;
-		if (dto.referralCode) {
-			await this.ensureDiscountCouponCanBeUsed(dto.referralCode, event);
-		}
 
 		const ticketItems: PreparedCheckoutItem[] = requestedTickets.map((item) => {
 			const ticketType = ticketTypes.find((ticket) => ticket.id === item.ticketTypeId);
@@ -355,8 +370,17 @@ export class TicketOrdersService {
 			};
 		});
 		const items = [...ticketItems, ...addOnItems];
+		const discountCoupon = normalizedReferralCode
+			? await this.ensureDiscountCouponCanBeUsed(normalizedReferralCode, event)
+			: null;
+		if (discountCoupon && !referralCode) {
+			referralCode = await this.ensureReferralCodeForDiscountCoupon(discountCoupon);
+		}
+		const discount = discountCoupon
+			? this.prepareDiscount(discountCoupon, items)
+			: null;
 
-		return { event, referralCode, items };
+		return { event, referralCode, discount, items };
 	}
 
 	async completeDemoPayment(orderId: string) {
@@ -415,7 +439,10 @@ export class TicketOrdersService {
 		}
 
 		const paidOrder = await this.markCheckoutSessionPaid(session);
-		const payment = await this.markInvoiceAndTransactionPaid(order, session);
+		if (!('id' in paidOrder)) {
+			throw new BadRequestException('Ticket order could not be reconciled');
+		}
+		const payment = await this.markInvoiceAndTransactionPaid(paidOrder, session);
 		return {
 			order: paidOrder,
 			invoice: payment.invoice,
@@ -458,6 +485,7 @@ export class TicketOrdersService {
 			order.referralCode.usesCount += 1;
 			await this.referralCodesRepository.save(order.referralCode);
 		}
+		await this.incrementDiscountCouponUsage(order);
 
 		order.tickets = await this.issueTickets(order);
 		return this.ticketOrdersRepository.save(order);
@@ -465,7 +493,11 @@ export class TicketOrdersService {
 
 	async handleStripeWebhook(payload: any) {
 		if (payload?.type === 'checkout.session.completed') {
-			return this.markCheckoutSessionPaid(payload.data.object);
+			const paidOrder = await this.markCheckoutSessionPaid(payload.data.object);
+			if ('id' in paidOrder) {
+				await this.markInvoiceAndTransactionPaid(paidOrder, payload.data.object);
+			}
+			return paidOrder;
 		}
 		return { received: true };
 	}
@@ -500,6 +532,14 @@ export class TicketOrdersService {
 				String(this.calculateApplicationFeeAmount(order)),
 			);
 			params.set('payment_intent_data[transfer_data][destination]', order.organization.stripeAccountId);
+		}
+		const discount = this.getOrderDiscount(order);
+		if (discount?.amount) {
+			const stripeCouponId = await this.createStripeCheckoutDiscountCoupon(discount, order.currency, secretKey, order.id);
+			this.updateFeeSnapshot(order, {
+				stripeCouponId,
+			});
+			params.set('discounts[0][coupon]', stripeCouponId);
 		}
 
 		order.items.forEach((item, index) => {
@@ -556,10 +596,10 @@ export class TicketOrdersService {
 
 		const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
 			method: 'POST',
-			headers: {
-				Authorization: `Bearer ${secretKey}`,
-				'Content-Type': 'application/x-www-form-urlencoded',
-			},
+				headers: {
+					Authorization: `Bearer ${secretKey}`,
+					'Content-Type': 'application/x-www-form-urlencoded',
+				},
 			body: params,
 		});
 		const payload = (await response.json()) as StripeCheckoutSession & { error?: { message?: string } };
@@ -599,18 +639,30 @@ export class TicketOrdersService {
 	private calculateApplicationFeeAmount(order: TicketOrderEntity) {
 		return Math.max(
 			0,
-			Math.round((Number(order.platformFee ?? 0) + this.feeSnapshotNumber(order, 'organizerProcessingFee', 0)) * 100),
+			Math.round((
+				Number(order.platformFee ?? 0) +
+				Number(order.processingFee ?? 0) +
+				this.feeSnapshotNumber(order, 'influencerCommission', 0)
+			) * 100),
 		);
 	}
 
-	private async calculateCheckoutFees(items: PreparedCheckoutItem[]) {
+	private async calculateCheckoutFees(items: PreparedCheckoutItem[], discount?: PreparedCheckoutDiscount | null) {
 		const settings = await this.platformSettingsService.getPricingSettings();
-		const subtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const grossSubtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const discountAmount = this.roundMoney(Math.min(discount?.amount ?? 0, grossSubtotal));
+		const subtotal = this.roundMoney(Math.max(0, grossSubtotal - discountAmount));
 		const ticketCount = items.reduce((sum, item) => sum + item.quantity, 0);
 		const buyerItems = items.filter((item) => item.feePayer === 'buyer');
 		const organizerItems = items.filter((item) => item.feePayer === 'organizer');
-		const buyerSubtotal = this.roundMoney(buyerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
-		const organizerSubtotal = this.roundMoney(organizerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const grossBuyerSubtotal = this.roundMoney(buyerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const grossOrganizerSubtotal = this.roundMoney(organizerItems.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const buyerDiscountAmount = grossSubtotal > 0
+			? this.roundMoney(discountAmount * (grossBuyerSubtotal / grossSubtotal))
+			: 0;
+		const organizerDiscountAmount = this.roundMoney(discountAmount - buyerDiscountAmount);
+		const buyerSubtotal = this.roundMoney(Math.max(0, grossBuyerSubtotal - buyerDiscountAmount));
+		const organizerSubtotal = this.roundMoney(Math.max(0, grossOrganizerSubtotal - organizerDiscountAmount));
 		const buyerTicketCount = buyerItems.reduce((sum, item) => sum + item.quantity, 0);
 		const organizerTicketCount = organizerItems.reduce((sum, item) => sum + item.quantity, 0);
 		const feePayer: TicketOrderEntity['feePayer'] = buyerItems.length && organizerItems.length
@@ -634,21 +686,37 @@ export class TicketOrdersService {
 		const platformFee = paidSubtotal ? this.roundMoney(buyerPlatformFee + organizerPlatformFee) : 0;
 		const processingFee = paidSubtotal ? this.roundMoney(buyerProcessingFee + organizerProcessingFee) : 0;
 		const total = this.roundMoney(subtotal + buyerPlatformFee + buyerProcessingFee);
-		const organizerNet = this.roundMoney(subtotal - organizerPlatformFee - organizerProcessingFee);
+		const influencerCommission = discount
+			? this.roundMoney(subtotal * (discount.influencerCommissionPercent / 100))
+			: 0;
+		const organizerNet = this.roundMoney(subtotal - organizerPlatformFee - organizerProcessingFee - influencerCommission);
 		if ((feePayer === 'organizer' || feePayer === 'mixed') && organizerNet < 0) {
 			throw new BadRequestException(
-				'Ticket price is too low for the organizer to absorb fees. Increase the ticket price or pass fees to buyers.',
+				'Ticket price is too low for the organizer to absorb fees, discounts, and influencer commission. Increase the ticket price or pass fees to buyers.',
 			);
 		}
 
 		return {
 			feePayer,
 			ticketCount,
+			grossSubtotal,
+			taxLiability: 'buyer',
+			taxIncludedInOrganizerNet: false,
+			discountCode: discount?.code ?? null,
+			discountType: discount?.type ?? null,
+			discountValue: discount?.value ?? 0,
+			discountAmount,
+			influencerCommissionPercent: discount?.influencerCommissionPercent ?? 0,
+			influencerCommission,
 			subtotal,
 			platformFee,
 			processingFee,
 			organizerNet,
 			total,
+			grossBuyerSubtotal,
+			grossOrganizerSubtotal,
+			buyerDiscountAmount,
+			organizerDiscountAmount,
 			buyerSubtotal,
 			organizerSubtotal,
 			buyerPlatformFee,
@@ -691,6 +759,55 @@ export class TicketOrdersService {
 			.filter((item) => item.quantity > 0);
 	}
 
+	private getOrderDiscount(order: TicketOrderEntity): PreparedCheckoutDiscount | null {
+		const rawDiscount = order.feeSnapshot?.discount;
+		if (!rawDiscount || typeof rawDiscount !== 'object') return null;
+		const discount = rawDiscount as Record<string, unknown>;
+		const amount = this.roundMoney(Number(discount.amount ?? 0));
+		if (amount <= 0) return null;
+		const type = discount.type === 'fixed' ? 'fixed' : 'percentage';
+		return {
+			coupon: discount.coupon as DiscountCouponEntity,
+			code: String(discount.code || order.referralCode?.code || 'DISCOUNT').toUpperCase(),
+			type,
+			value: Number(discount.value ?? 0),
+			amount,
+			influencerCommissionPercent: Number(discount.influencerCommissionPercent ?? 0),
+			influencerCommission: Number(discount.influencerCommission ?? 0),
+			stripeCouponId: typeof discount.stripeCouponId === 'string' ? discount.stripeCouponId : null,
+		};
+	}
+
+	private toDiscountSnapshot(discount: PreparedCheckoutDiscount | null, influencerCommission: number) {
+		if (!discount) return null;
+		return {
+			couponId: discount.coupon?.id ?? null,
+			code: discount.code,
+			type: discount.type,
+			value: discount.value,
+			amount: discount.amount,
+			influencerCommissionPercent: discount.influencerCommissionPercent,
+			influencerCommission,
+		};
+	}
+
+	private prepareDiscount(coupon: DiscountCouponEntity, items: PreparedCheckoutItem[]): PreparedCheckoutDiscount {
+		const subtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
+		const couponValue = Math.max(0, Number(coupon.value || 0));
+		const amount = coupon.type === 'percentage'
+			? this.roundMoney(subtotal * (Math.min(couponValue, 100) / 100))
+			: this.roundMoney(Math.min(couponValue, subtotal));
+		return {
+			coupon,
+			code: coupon.code.trim().toUpperCase(),
+			type: coupon.type,
+			value: couponValue,
+			amount,
+			influencerCommissionPercent: Math.max(0, Number(coupon.influencerCommissionPercent || 0)),
+			influencerCommission: 0,
+		};
+	}
+
 	private normalizeEventAddOns(event: EventEntity) {
 		return (event.addOns || [])
 			.map((raw, index) => {
@@ -729,6 +846,17 @@ export class TicketOrdersService {
 			};
 		});
 		await this.eventsRepository.save(event);
+	}
+
+	private async incrementDiscountCouponUsage(order: TicketOrderEntity) {
+		const discount = this.getOrderDiscount(order);
+		if (!discount?.code) return;
+		const coupon = await this.discountCouponsRepository.findOne({
+			where: { code: discount.code },
+		});
+		if (!coupon) return;
+		coupon.usesCount += 1;
+		await this.discountCouponsRepository.save(coupon);
 	}
 
 	private roundMoney(value: number) {
@@ -776,13 +904,32 @@ export class TicketOrdersService {
 		if (typeof session.amount_total === 'number') {
 			order.total = this.roundMoney(session.amount_total / 100);
 		}
+		this.updateFeeSnapshot(order, {
+			stripeAmountSubtotal: typeof session.amount_subtotal === 'number'
+				? this.roundMoney(session.amount_subtotal / 100)
+				: this.feeSnapshotNumber(order, 'stripeAmountSubtotal', Number(order.subtotal ?? 0)),
+			stripeAmountDiscount: typeof session.total_details?.amount_discount === 'number'
+				? this.roundMoney(session.total_details.amount_discount / 100)
+				: this.feeSnapshotNumber(order, 'stripeAmountDiscount', this.feeSnapshotNumber(order, 'discountAmount', 0)),
+			stripeTaxAmount: Number(order.tax ?? 0),
+			stripeAmountTotal: Number(order.total ?? 0),
+			taxLiability: 'buyer',
+			taxIncludedInOrganizerNet: false,
+		});
+	}
+
+	private updateFeeSnapshot(order: TicketOrderEntity, updates: Record<string, unknown>) {
+		order.feeSnapshot = {
+			...(order.feeSnapshot ?? {}),
+			...updates,
+		};
 	}
 
 	private async ensureDiscountCouponCanBeUsed(code: string, event: EventEntity) {
 		const coupon = await this.discountCouponsRepository.findOne({
 			where: { code: code.trim().toUpperCase() },
 		});
-		if (!coupon) return;
+		if (!coupon) return null;
 		if (coupon.organization.id !== event.organization.id) {
 			throw new BadRequestException('Coupon does not belong to this organizer');
 		}
@@ -808,6 +955,52 @@ export class TicketOrdersService {
 		if (coupon.maxUses !== null && coupon.maxUses !== undefined && coupon.usesCount >= coupon.maxUses) {
 			throw new BadRequestException('Coupon usage limit has been reached');
 		}
+		return coupon;
+	}
+
+	private async ensureReferralCodeForDiscountCoupon(coupon: DiscountCouponEntity) {
+		const code = coupon.code.trim().toUpperCase();
+		const existing = await this.referralCodesRepository.findOne({ where: { code } });
+		if (existing) return existing;
+		if (!coupon.agent) return null;
+		return this.referralCodesRepository.save(
+			this.referralCodesRepository.create({
+				agent: coupon.agent,
+				event: coupon.event ?? null,
+				code,
+				status: 'active',
+			}),
+		);
+	}
+
+	private async createStripeCheckoutDiscountCoupon(
+		discount: PreparedCheckoutDiscount,
+		currency: string,
+		secretKey: string,
+		orderId: string,
+	) {
+		if (discount.stripeCouponId) return discount.stripeCouponId;
+
+		const params = new URLSearchParams();
+		params.set('duration', 'once');
+		params.set('name', `Venue Spice ${discount.code}`);
+		params.set('amount_off', String(Math.round(discount.amount * 100)));
+		params.set('currency', currency.toLowerCase());
+
+		const response = await fetch('https://api.stripe.com/v1/coupons', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${secretKey}`,
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'Idempotency-Key': `ticket-order-discount:${orderId}:${discount.code}:${Math.round(discount.amount * 100)}`,
+			},
+			body: params,
+		});
+		const payload = (await response.json()) as StripeCoupon;
+		if (!response.ok || !payload.id) {
+			throw new BadRequestException(payload.error?.message ?? 'Stripe discount could not be prepared');
+		}
+		return payload.id;
 	}
 
 	private async retrieveStripeSession(sessionId: string): Promise<StripeCheckoutSession> {
@@ -880,6 +1073,17 @@ export class TicketOrdersService {
 				lineTotal: Number(item.lineTotal),
 			}),
 		);
+		const discount = this.getOrderDiscount(order);
+		const discountInvoiceItems = discount?.amount
+			? [
+					this.invoiceItemsRepository.create({
+						description: `Discount (${discount.code}) - ${order.event.title}`,
+						qty: 1,
+						unitPrice: -Number(discount.amount),
+						lineTotal: -Number(discount.amount),
+					}),
+			  ]
+			: [];
 		const invoice = await this.invoicesRepository.save(
 			this.invoicesRepository.create({
 				invoiceNumber: this.buildInvoiceNumber(),
@@ -899,6 +1103,7 @@ export class TicketOrdersService {
 						}),
 					),
 					...addOnInvoiceItems,
+					...discountInvoiceItems,
 				],
 			}),
 		);

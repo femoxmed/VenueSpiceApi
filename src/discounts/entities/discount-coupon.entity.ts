@@ -54,6 +54,7 @@ export class DiscountCouponEntity {
 		| 'pending_influencer_approval'
 		| 'active'
 		| 'declined'
+		| 'revoked'
 		| 'paused'
 		| 'expired'
 		| 'archived';

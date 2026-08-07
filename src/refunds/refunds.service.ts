@@ -7,6 +7,8 @@ import { AuditService } from '../audit/audit.service';
 import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
+import { InvoiceEntity } from '../invoices/entities/invoice.entity';
+import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { CreateRefundRequestDto } from './dto/create-refund-request.dto';
@@ -35,6 +37,10 @@ export class RefundsService {
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
 		@InjectRepository(UserEntity)
 		private readonly usersRepository: Repository<UserEntity>,
+		@InjectRepository(InvoiceEntity)
+		private readonly invoicesRepository: Repository<InvoiceEntity>,
+		@InjectRepository(PaymentIntentEntity)
+		private readonly paymentIntentsRepository: Repository<PaymentIntentEntity>,
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
 	) {}
@@ -196,12 +202,18 @@ export class RefundsService {
 				amount: Math.round(Number(order.total || 0) * 100),
 				currency: order.currency.toLowerCase(),
 				payment_intent: order.stripePaymentIntentId ?? `local_${order.id}`,
+				reverse_transfer: true,
+				refund_application_fee: true,
 			};
 		}
 
 		const params = new URLSearchParams();
 		params.set('payment_intent', order.stripePaymentIntentId);
+		params.set('reverse_transfer', 'true');
+		params.set('refund_application_fee', 'true');
 		params.set('metadata[ticketOrderId]', order.id);
+		params.set('metadata[reverseTransfer]', 'true');
+		params.set('metadata[refundApplicationFee]', 'true');
 
 		const response = await fetch('https://api.stripe.com/v1/refunds', {
 			method: 'POST',
@@ -233,7 +245,32 @@ export class RefundsService {
 				await this.ticketTypesRepository.save(item.ticketType);
 			}
 		}
+		await this.markInvoiceAndTransactionRefunded(order);
 		return this.ticketOrdersRepository.save(order);
+	}
+
+	private async markInvoiceAndTransactionRefunded(order: TicketOrderEntity) {
+		const idempotencyKey = `ticket-order:${order.id}`;
+		const transaction = await this.paymentIntentsRepository.findOne({
+			where: { idempotencyKey },
+			relations: { invoice: true },
+		});
+		if (transaction) {
+			transaction.status = 'refunded';
+			transaction.providerStatus = 'refunded';
+			transaction.providerPayload = {
+				...(transaction.providerPayload ?? {}),
+				refundedAt: new Date().toISOString(),
+				reverseTransfer: true,
+				refundApplicationFee: true,
+			};
+			await this.paymentIntentsRepository.save(transaction);
+		}
+
+		if (transaction?.invoice) {
+			transaction.invoice.status = 'refunded';
+			await this.invoicesRepository.save(transaction.invoice);
+		}
 	}
 
 	private isAdminRole(role: Role) {

@@ -7,6 +7,7 @@ export class UpdateDiscountCouponStatusDto {
 		'pending_influencer_approval',
 		'active',
 		'declined',
+		'revoked',
 		'paused',
 		'expired',
 		'archived',
@@ -16,6 +17,7 @@ export class UpdateDiscountCouponStatusDto {
 		| 'pending_influencer_approval'
 		| 'active'
 		| 'declined'
+		| 'revoked'
 		| 'paused'
 		| 'expired'
 		| 'archived';

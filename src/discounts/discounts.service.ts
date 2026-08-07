@@ -149,26 +149,33 @@ export class DiscountsService {
 				? couponByCode.get(order.referralCode.code.toUpperCase())
 				: undefined;
 			const commissionPercent = this.resolveCommissionPercent(order, coupon);
+			const orderGrossSubtotal = this.feeSnapshotNumber(order, 'grossSubtotal', order.items.reduce((sum, item) => sum + Number(item.lineTotal || 0), 0));
+			const orderDiscountAmount = this.feeSnapshotNumber(order, 'discountAmount', 0);
+			const orderCommission = this.feeSnapshotNumber(order, 'influencerCommission', 0);
 			const availableAt = this.calculateAvailableAt(order.event);
 			const earningStatus = availableAt.getTime() <= Date.now() ? 'available' : 'pending';
 
 			return order.items.map((item) => {
-				const totalCost = Number(item.lineTotal || 0);
-				const commission = totalCost * (commissionPercent / 100);
+				const lineTotal = Number(item.lineTotal || 0);
+				const lineRatio = orderGrossSubtotal > 0 ? lineTotal / orderGrossSubtotal : 0;
+				const totalCost = this.roundMoney(lineTotal - orderDiscountAmount * lineRatio);
+				const commission = orderCommission > 0
+					? this.roundMoney(orderCommission * lineRatio)
+					: this.roundMoney(totalCost * (commissionPercent / 100));
 				return {
 					id: `${order.id}-${item.id}`,
 					orderId: order.id,
-					date: (order.paidAt || order.createdAt).toISOString(),
-					event: order.event.title,
-					eventId: order.event.id,
-					eventStartsAt: order.event.startsAt?.toISOString?.() ?? order.event.startsAt,
+					date: this.toSafeIso(order.paidAt || order.createdAt),
+					event: order.event?.title || 'Event',
+					eventId: order.event?.id || null,
+					eventStartsAt: this.toSafeIso(order.event?.startsAt),
 					item: item.ticketName,
 					quantity: item.quantity,
 					totalCost,
 					commission,
 					commissionPercent,
 					status: earningStatus,
-					availableAt: availableAt.toISOString(),
+					availableAt: this.toSafeIso(availableAt),
 					couponCode: order.referralCode?.code ?? null,
 					currency: order.currency,
 				};
@@ -209,7 +216,7 @@ export class DiscountsService {
 		if (status === 'active' && !coupon.approvedByInfluencerAt) {
 			throw new BadRequestException('Influencer approval is required before this coupon can be active');
 		}
-		if (['pending_influencer_signup', 'pending_influencer_approval', 'declined'].includes(status)) {
+		if (['pending_influencer_signup', 'pending_influencer_approval', 'declined', 'revoked'].includes(status)) {
 			throw new BadRequestException('This status is controlled by the influencer approval flow');
 		}
 		coupon.status = status;
@@ -264,6 +271,20 @@ export class DiscountsService {
 		return this.couponsRepository.save(coupon);
 	}
 
+	async revoke(id: string, user?: { id: string; role: Role }) {
+		const coupon = await this.couponsRepository.findOne({ where: { id } });
+		if (!coupon) throw new NotFoundException('Discount coupon not found');
+		if (user && !this.isAdminRole(user.role) && coupon.organization.ownerUserId !== user.id) {
+			throw new ForbiddenException('You cannot revoke discounts for this organization');
+		}
+		if (!['pending_influencer_signup', 'pending_influencer_approval'].includes(coupon.status)) {
+			throw new BadRequestException('Only pending campaign invites can be revoked');
+		}
+
+		coupon.status = 'revoked';
+		return this.couponsRepository.save(coupon);
+	}
+
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF].includes(role);
 	}
@@ -273,6 +294,7 @@ export class DiscountsService {
 		if (!this.isValidInfluencerUser(user)) {
 			throw new ForbiddenException('Only influencer accounts can access this resource');
 		}
+		await this.reconcilePendingInfluencerSignup(user);
 
 		return this.agentsRepository.findOne({
 			where: [
@@ -281,6 +303,41 @@ export class DiscountsService {
 			],
 			order: { createdAt: 'DESC' },
 		});
+	}
+
+	private async reconcilePendingInfluencerSignup(user: UserEntity) {
+		if (!user.isActive || !user.verifiedAt) return;
+		const normalizedEmail = user.email.toLowerCase();
+		const agents = await this.agentsRepository.find({
+			where: { email: normalizedEmail },
+		});
+		if (!agents.length) return;
+
+		for (const agent of agents) {
+			let agentChanged = false;
+			if (!agent.user) {
+				agent.user = user;
+				agentChanged = true;
+			}
+			if (agent.status !== 'active') {
+				agent.status = 'active';
+				agentChanged = true;
+			}
+			if (agentChanged) {
+				await this.agentsRepository.save(agent);
+			}
+
+			const pendingCoupons = await this.couponsRepository.find({
+				where: {
+					agent: { id: agent.id },
+					status: 'pending_influencer_signup',
+				},
+			});
+			for (const coupon of pendingCoupons) {
+				coupon.status = 'pending_influencer_approval';
+				await this.couponsRepository.save(coupon);
+			}
+		}
 	}
 
 	private resolveCommissionPercent(order: TicketOrderEntity, coupon?: DiscountCouponEntity) {
@@ -304,12 +361,22 @@ export class DiscountsService {
 		);
 	}
 
-	private calculateAvailableAt(event: EventEntity) {
+	private calculateAvailableAt(event?: EventEntity | null) {
 		const holdDays = this.getInfluencerHoldDays();
-		const anchor = event.endsAt || event.startsAt || new Date();
+		const anchor = this.toValidDate(event?.endsAt) || this.toValidDate(event?.startsAt) || new Date();
 		const availableAt = new Date(anchor);
 		availableAt.setDate(availableAt.getDate() + holdDays);
 		return availableAt;
+	}
+
+	private toValidDate(value?: Date | string | null) {
+		if (!value) return null;
+		const date = value instanceof Date ? value : new Date(value);
+		return Number.isNaN(date.getTime()) ? null : date;
+	}
+
+	private toSafeIso(value?: Date | string | null) {
+		return this.toValidDate(value)?.toISOString() ?? null;
 	}
 
 	private getInfluencerHoldDays() {
@@ -432,6 +499,16 @@ export class DiscountsService {
 
 	private joinUrl(base: string, path: string) {
 		return `${base.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+	}
+
+	private feeSnapshotNumber(order: TicketOrderEntity, key: string, fallback: number) {
+		const value = order.feeSnapshot?.[key];
+		const numeric = Number(value);
+		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	private roundMoney(value: number) {
+		return Math.round((Number(value) || 0) * 100) / 100;
 	}
 
 	private async ensureInfluencerCanDecide(coupon: DiscountCouponEntity, userId: string) {

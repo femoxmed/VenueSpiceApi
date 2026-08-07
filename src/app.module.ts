@@ -31,6 +31,8 @@ import { VendorCategoriesModule } from './vendor-categories/vendor-categories.mo
 import { VendorCatalogueModule } from './vendor-catalogue/vendor-catalogue.module';
 import { RefundsModule } from './refunds/refunds.module';
 import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
+import { FinancialLedgerModule } from './financial-ledger/financial-ledger.module';
+import { OrganizerSalesModule } from './organizer-sales/organizer-sales.module';
 import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
 import { OrganizationMemberEntity } from './organizations/entities/organization-member.entity';
@@ -65,6 +67,7 @@ import { VendorCategoryEntity } from './vendor-categories/entities/vendor-catego
 import { VendorCatalogueItemEntity } from './vendor-catalogue/entities/vendor-catalogue-item.entity';
 import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
 import { PlatformSettingEntity } from './platform-settings/entities/platform-setting.entity';
+import { FinancialLedgerEntryEntity } from './financial-ledger/entities/financial-ledger-entry.entity';
 import { DatabaseModule } from './database/database.module';
 
 function isEnabled(value?: string | boolean | number | null) {
@@ -143,6 +146,7 @@ function getBullQueuePrefix(value?: string | null) {
 					VendorCatalogueItemEntity,
 					RefundRequestEntity,
 					PlatformSettingEntity,
+					FinancialLedgerEntryEntity,
 				],
 			}),
 		}),
@@ -201,6 +205,8 @@ function getBullQueuePrefix(value?: string | null) {
 			VendorCatalogueModule,
 			RefundsModule,
 			PlatformSettingsModule,
+			FinancialLedgerModule,
+			OrganizerSalesModule,
 		],
 	})
 export class AppModule {}

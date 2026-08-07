@@ -73,4 +73,10 @@ export class DiscountsController {
 	decline(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
 		return this.discountsService.decline(id, req.user);
 	}
+
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)
+	@Post(':id/revoke')
+	revoke(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
+		return this.discountsService.revoke(id, req.user);
+	}
 }
