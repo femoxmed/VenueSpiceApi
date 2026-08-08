@@ -10,7 +10,7 @@ import { ScanTicketDto } from './dto/scan-ticket.dto';
 @ApiTags('Check In')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
-@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF)
+@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 @Controller('check-in')
 export class CheckInController {
 	constructor(private readonly checkInService: CheckInService) {}
@@ -40,11 +40,31 @@ export class CheckInController {
 		return this.checkInService.search(eventId, req.user, q);
 	}
 
+	@Get('events/:eventId/tickets')
+	listTickets(
+		@Param('eventId') eventId: string,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+		@Query('page') page?: string,
+		@Query('pageSize') pageSize?: string,
+		@Query('search') search?: string,
+		@Query('status') status?: string,
+	) {
+		return this.checkInService.listTickets(eventId, req.user, { page, pageSize, search, status });
+	}
+
 	@Post('scan')
 	scan(
 		@Body() dto: ScanTicketDto,
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
 		return this.checkInService.scan(dto, req.user);
+	}
+
+	@Post('lookup')
+	lookup(
+		@Body() dto: ScanTicketDto,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.checkInService.lookup(dto, req.user);
 	}
 }

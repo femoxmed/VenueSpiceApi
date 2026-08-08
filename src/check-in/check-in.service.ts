@@ -154,6 +154,60 @@ export class CheckInService {
 		};
 	}
 
+	async lookup(dto: ScanTicketDto, user: CheckInUser) {
+		const event = await this.getEventForCheckIn(dto.eventId, user);
+		const code = this.normalizeCode(dto.code);
+		const ticket = await this.issuedTicketsRepository.findOne({
+			where: { code },
+			relations: ['event', 'event.organization', 'ticketType', 'order'],
+		});
+
+		if (!ticket) {
+			return {
+				status: 'invalid',
+				message: 'Ticket not found. Check the code and try again.',
+			};
+		}
+
+		if (ticket.event?.id !== event.id) {
+			return {
+				status: 'wrong_event',
+				message: 'This ticket belongs to a different event.',
+				ticket: this.mapTicket(ticket),
+			};
+		}
+
+		if (ticket.order?.status !== 'paid') {
+			return {
+				status: 'unpaid',
+				message: 'This order has not been paid successfully.',
+				ticket: this.mapTicket(ticket),
+			};
+		}
+
+		if (['void', 'refunded'].includes(ticket.status)) {
+			return {
+				status: ticket.status,
+				message: ticket.status === 'refunded' ? 'This ticket has been refunded.' : 'This ticket is no longer valid.',
+				ticket: this.mapTicket(ticket),
+			};
+		}
+
+		if (ticket.status === 'checked_in') {
+			return {
+				status: 'already_checked_in',
+				message: `Already checked in${ticket.checkedInAt ? ` at ${ticket.checkedInAt.toLocaleString('en-US')}` : ''}.`,
+				ticket: this.mapTicket(ticket),
+			};
+		}
+
+		return {
+			status: 'ready',
+			message: 'Ticket found. Confirm before checking in this attendee.',
+			ticket: this.mapTicket(ticket),
+		};
+	}
+
 	async search(eventId: string, user: CheckInUser, term?: string) {
 		await this.getEventForCheckIn(eventId, user);
 		const search = `%${String(term || '').trim().toLowerCase()}%`;
@@ -180,6 +234,57 @@ export class CheckInService {
 			.getMany();
 
 		return tickets.map((ticket) => this.mapTicket(ticket));
+	}
+
+	async listTickets(
+		eventId: string,
+		user: CheckInUser,
+		query: { page?: string; pageSize?: string; search?: string; status?: string },
+	) {
+		await this.getEventForCheckIn(eventId, user);
+		const page = Math.max(1, Number(query.page) || 1);
+		const pageSize = Math.min(50, Math.max(5, Number(query.pageSize) || 12));
+		const search = String(query.search || '').trim().toLowerCase();
+		const status = String(query.status || '').trim();
+
+		const builder = this.issuedTicketsRepository
+			.createQueryBuilder('ticket')
+			.leftJoinAndSelect('ticket.ticketType', 'ticketType')
+			.leftJoinAndSelect('ticket.order', 'order')
+			.leftJoinAndSelect('ticket.event', 'event')
+			.where('event.id = :eventId', { eventId });
+
+		if (status && status !== 'all') {
+			builder.andWhere('ticket.status = :status', { status });
+		}
+
+		if (search) {
+			builder.andWhere(
+				new Brackets((searchBuilder) => {
+					searchBuilder
+						.where('LOWER(ticket.code) LIKE :search', { search: `%${search}%` })
+						.orWhere('LOWER(ticket.holderName) LIKE :search', { search: `%${search}%` })
+						.orWhere('LOWER(ticket.holderEmail) LIKE :search', { search: `%${search}%` })
+						.orWhere('LOWER(ticketType.name) LIKE :search', { search: `%${search}%` })
+						.orWhere('LOWER(order.customerName) LIKE :search', { search: `%${search}%` })
+						.orWhere('LOWER(order.customerEmail) LIKE :search', { search: `%${search}%` });
+				}),
+			);
+		}
+
+		const [tickets, total] = await builder
+			.orderBy('ticket.createdAt', 'DESC')
+			.skip((page - 1) * pageSize)
+			.take(pageSize)
+			.getManyAndCount();
+
+		return {
+			items: tickets.map((ticket) => this.mapTicket(ticket)),
+			total,
+			page,
+			pageSize,
+			pageCount: Math.max(1, Math.ceil(total / pageSize)),
+		};
 	}
 
 	private async getEventForCheckIn(eventId: string, user: CheckInUser) {
