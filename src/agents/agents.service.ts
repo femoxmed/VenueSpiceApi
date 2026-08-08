@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Brackets, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { EventEntity } from '../events/entities/event.entity';
 import { Role } from '../common/enums/role.enum';
@@ -10,6 +10,8 @@ import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity
 import { CreateAgentDto } from './dto/create-agent.dto';
 import { AgentEntity } from './entities/agent.entity';
 import { ReferralCodeEntity } from './entities/referral-code.entity';
+
+type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string; status?: string };
 
 @Injectable()
 export class AgentsService {
@@ -28,21 +30,60 @@ export class AgentsService {
 		private readonly configService: ConfigService,
 	) {}
 
-	async findAll(organizationId?: string, user?: { id: string; role: Role }) {
+	async findAll(organizationId?: string, user?: { id: string; role: Role }, query: PaginationQuery = {}) {
+		if (!this.hasPaginationQuery(query)) {
+			if (user && !this.isAdminRole(user.role)) {
+				if (!organizationId) {
+					return this.agentsRepository.find({
+						where: { organization: { ownerUserId: user.id } },
+						order: { createdAt: 'DESC' },
+					});
+				}
+				await this.ensureOrganizationAccess(organizationId, user.id);
+			}
+
+			return this.agentsRepository.find({
+				where: organizationId ? { organization: { id: organizationId } } : {},
+				order: { createdAt: 'DESC' },
+			});
+		}
+		const pagination = this.parsePagination(query);
+		const builder = this.agentsRepository
+			.createQueryBuilder('agent')
+			.leftJoinAndSelect('agent.organization', 'organization')
+			.leftJoinAndSelect('agent.user', 'user')
+			.leftJoinAndSelect('agent.referralCodes', 'referralCodes')
+			.orderBy('agent.createdAt', 'DESC')
+			.skip((pagination.page - 1) * pagination.pageSize)
+			.take(pagination.pageSize);
+
 		if (user && !this.isAdminRole(user.role)) {
 			if (!organizationId) {
-				return this.agentsRepository.find({
-					where: { organization: { ownerUserId: user.id } },
-					order: { createdAt: 'DESC' },
-				});
+				builder.where('organization.ownerUserId = :ownerUserId', { ownerUserId: user.id });
+			} else {
+				await this.ensureOrganizationAccess(organizationId, user.id);
+				builder.where('organization.id = :organizationId', { organizationId });
 			}
-			await this.ensureOrganizationAccess(organizationId, user.id);
+		} else if (organizationId) {
+			builder.where('organization.id = :organizationId', { organizationId });
 		}
 
-		return this.agentsRepository.find({
-			where: organizationId ? { organization: { id: organizationId } } : {},
-			order: { createdAt: 'DESC' },
-		});
+		if (query.status?.trim()) {
+			builder.andWhere('agent.status = :status', { status: query.status.trim() });
+		}
+		if (query.search?.trim()) {
+			const search = `%${query.search.trim()}%`;
+			builder.andWhere(
+				new Brackets((qb) => {
+					qb.where('agent.fullName ILIKE :search', { search })
+						.orWhere('agent.email ILIKE :search', { search })
+						.orWhere('referralCodes.code ILIKE :search', { search });
+				}),
+			);
+		}
+
+		const [items, total] = await builder.getManyAndCount();
+		return this.paginated(items, total, pagination.page, pagination.pageSize);
 	}
 
 	async create(dto: CreateAgentDto, user?: { id: string; role: Role }) {
@@ -236,6 +277,27 @@ export class AgentsService {
 
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF].includes(role);
+	}
+
+	private parsePagination(query: PaginationQuery) {
+		const page = Math.max(1, Number.parseInt(String(query.page ?? '1'), 10) || 1);
+		const requestedPageSize = Number.parseInt(String(query.pageSize ?? '8'), 10) || 8;
+		const pageSize = Math.min(50, Math.max(1, requestedPageSize));
+		return { page, pageSize };
+	}
+
+	private hasPaginationQuery(query: PaginationQuery) {
+		return Boolean(query.page ?? query.pageSize ?? query.search ?? query.status);
+	}
+
+	private paginated<T>(items: T[], total: number, page: number, pageSize: number) {
+		return {
+			items,
+			total,
+			page,
+			pageSize,
+			pageCount: Math.max(1, Math.ceil(total / pageSize)),
+		};
 	}
 
 	private async ensureOrganizationAccess(organizationId: string, ownerUserId: string) {

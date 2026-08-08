@@ -34,6 +34,7 @@ import { RefundsModule } from './refunds/refunds.module';
 import { PlatformSettingsModule } from './platform-settings/platform-settings.module';
 import { FinancialLedgerModule } from './financial-ledger/financial-ledger.module';
 import { OrganizerSalesModule } from './organizer-sales/organizer-sales.module';
+import { CheckInModule } from './check-in/check-in.module';
 import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
 import { OrganizationMemberEntity } from './organizations/entities/organization-member.entity';
@@ -211,6 +212,7 @@ function getBullQueuePrefix(value?: string | null) {
 			PlatformSettingsModule,
 			FinancialLedgerModule,
 			OrganizerSalesModule,
+			CheckInModule,
 		],
 	})
 export class AppModule {}

@@ -244,17 +244,24 @@ export class NotificationsService implements OnApplicationBootstrap {
 	</head>
 	<body style="margin:0;padding:0;background:#EEF4FF;color:#171B24;">
 		<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${this.escapeHtml(preheader)}</div>
-		<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#EEF4FF;border-collapse:collapse;">
+		<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F7FB;border-collapse:collapse;">
 			<tr>
 				<td align="center" style="padding:34px 16px;">
 					<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;border-collapse:collapse;">
 						<tr>
-							<td style="padding:0 0 22px 0;">
+							<td style="padding:0 0 20px 0;">
 								<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
 									<tr>
 										<td>
-											<div style="font:900 28px Arial Black,Arial,sans-serif;letter-spacing:0;color:#171B24;line-height:1;"><span style="color:#171B24;">EVENT</span><span style="font-weight:400;color:#171B24;">BOX</span></div>
-											<div style="margin-top:7px;font:700 10px Arial,sans-serif;letter-spacing:3px;color:#2960EC;text-transform:uppercase;">Tickets. Vendors. Events.</div>
+											<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+												<tr>
+													<td style="width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#E5A21A 0%,#EA177C 52%,#3F22D8 100%);color:#FFFFFF;font:900 18px Arial Black,Arial,sans-serif;text-align:center;vertical-align:middle;">VS</td>
+													<td style="padding-left:12px;">
+														<div style="font:900 24px Arial Black,Arial,sans-serif;letter-spacing:0;color:#171B24;line-height:1;">Venue Spice</div>
+														<div style="margin-top:6px;font:700 10px Arial,sans-serif;letter-spacing:2.5px;color:#3F45FF;text-transform:uppercase;">Tickets. Vendors. Events.</div>
+													</td>
+												</tr>
+											</table>
 										</td>
 										<td align="right" style="font:700 11px Arial,sans-serif;letter-spacing:1.8px;color:#EA177C;text-transform:uppercase;">Your event starts here</td>
 									</tr>
@@ -262,13 +269,13 @@ export class NotificationsService implements OnApplicationBootstrap {
 							</td>
 						</tr>
 						<tr>
-							<td style="border:1px solid #DCE5FF;background:#FFFFFF;border-radius:24px;overflow:hidden;box-shadow:0 18px 45px rgba(41,96,236,0.14);">
-								<div style="height:8px;background:linear-gradient(90deg,#F15A24 0%,#EA177C 48%,#2B2FE4 100%);line-height:8px;font-size:8px;">&nbsp;</div>
-								<div style="padding:40px 34px 34px;">
+							<td style="border:1px solid #E1E6F5;background:#FFFFFF;border-radius:22px;overflow:hidden;box-shadow:0 18px 50px rgba(24,31,56,0.10);">
+								<div style="height:7px;background:linear-gradient(90deg,#E5A21A 0%,#EA177C 50%,#3F45FF 100%);line-height:7px;font-size:7px;">&nbsp;</div>
+								<div style="padding:38px 34px 34px;">
 									${options.eyebrow ? `<div style="margin-bottom:14px;font:800 11px Arial,sans-serif;letter-spacing:2.1px;color:#2960EC;text-transform:uppercase;">${this.escapeHtml(options.eyebrow)}</div>` : ''}
-									<h1 style="margin:0;color:#171B24;font:900 34px/1.08 Arial Black,Arial,sans-serif;letter-spacing:-0.4px;">${this.escapeHtml(options.title)}</h1>
+									<h1 style="margin:0;color:#171B24;font:900 31px/1.15 Arial Black,Arial,sans-serif;letter-spacing:0;">${this.escapeHtml(options.title)}</h1>
 									${options.greeting ? `<p style="margin:24px 0 0;color:#171B24;font:700 16px/1.7 Arial,sans-serif;">${this.escapeHtml(options.greeting)}</p>` : ''}
-									${options.intro ? `<p style="margin:14px 0 0;color:#4A5268;font:400 15px/1.8 Arial,sans-serif;">${this.escapeHtml(options.intro)}</p>` : ''}
+									${options.intro ? `<p style="margin:12px 0 0;color:#4A5268;font:400 15px/1.8 Arial,sans-serif;">${this.escapeHtml(options.intro)}</p>` : ''}
 									${body ? `<div style="margin-top:18px;color:#4A5268;font:400 15px/1.8 Arial,sans-serif;">${body}</div>` : ''}
 									${rows}
 									${actionHtml || secondaryActionHtml ? `<div style="margin-top:26px;">${actionHtml}${secondaryActionHtml}</div>` : ''}

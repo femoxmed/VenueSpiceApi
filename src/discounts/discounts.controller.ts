@@ -19,9 +19,13 @@ export class DiscountsController {
 	@Get()
 	findAll(
 		@Query('organizationId') organizationId: string | undefined,
+		@Query('page') page: string | undefined,
+		@Query('pageSize') pageSize: string | undefined,
+		@Query('search') search: string | undefined,
+		@Query('status') status: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.discountsService.findAll(organizationId, req.user);
+		return this.discountsService.findAll(organizationId, req.user, { page, pageSize, search, status });
 	}
 
 	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)

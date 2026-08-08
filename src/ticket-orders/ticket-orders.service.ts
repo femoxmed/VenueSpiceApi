@@ -1180,8 +1180,20 @@ export class TicketOrdersService {
 					.map(
 						(ticket) => `
 							<tr>
-								<td style="padding:10px 0;color:#171B24;font:700 14px Arial,sans-serif;">${this.escapeEmailHtml(ticket.ticketType?.name || 'Ticket')}</td>
-								<td style="padding:10px 0;color:#2960EC;font:800 14px Arial,sans-serif;text-align:right;">${this.escapeEmailHtml(ticket.code)}</td>
+								<td style="padding:14px 0;border-top:1px solid #E5EAF7;">
+									<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
+										<tr>
+											<td style="vertical-align:top;">
+												<div style="color:#171B24;font:800 15px Arial,sans-serif;">${this.escapeEmailHtml(ticket.ticketType?.name || 'Ticket')}</div>
+												<div style="margin-top:5px;color:#68708A;font:400 12px Arial,sans-serif;">Holder: ${this.escapeEmailHtml(ticket.holderName || order.customerName)}</div>
+												<div style="margin-top:10px;display:inline-block;padding:8px 11px;border-radius:10px;background:#FFFFFF;border:1px solid #DDE6FF;color:#2960EC;font:900 14px Arial Black,Arial,sans-serif;letter-spacing:1px;">${this.escapeEmailHtml(ticket.code)}</div>
+											</td>
+											<td align="right" style="width:92px;vertical-align:top;">
+												<img src="${this.buildTicketQrUrl(ticket.code)}" width="82" height="82" alt="Ticket QR code" style="display:block;border:1px solid #E5EAF7;border-radius:12px;padding:4px;background:#FFFFFF;">
+											</td>
+										</tr>
+									</table>
+								</td>
 							</tr>
 						`,
 					)
@@ -1213,6 +1225,10 @@ export class TicketOrdersService {
 			},
 			note: 'Keep this email handy. The ticket codes may be required at check-in.',
 		});
+	}
+
+	private buildTicketQrUrl(code: string) {
+		return `https://api.qrserver.com/v1/create-qr-code/?size=180x180&margin=8&data=${encodeURIComponent(code)}`;
 	}
 
 	private escapeEmailHtml(value: string) {

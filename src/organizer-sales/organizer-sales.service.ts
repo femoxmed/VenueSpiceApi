@@ -1,7 +1,7 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { Brackets, In, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
@@ -15,6 +15,7 @@ import { TicketOrderItemEntity } from '../ticket-orders/entities/ticket-order-it
 import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 
 type SalesUser = { id: string; email?: string; role: Role };
+type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string };
 
 type SalesLine = {
 	id: string;
@@ -96,10 +97,38 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async orders(organizationId: string, user: SalesUser) {
+	async orders(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const orders = await this.getOrders(organizationId);
-		return orders.map((order) => this.toOrderRow(order));
+		if (!this.hasPaginationQuery(query)) {
+			const orders = await this.getOrders(organizationId);
+			return orders.map((order) => this.toOrderRow(order));
+		}
+		await this.ledgerService.syncOrganizationOrders(organizationId);
+		const pagination = this.parsePagination(query);
+		const builder = this.ticketOrdersRepository
+			.createQueryBuilder('order')
+			.leftJoinAndSelect('order.organization', 'organization')
+			.leftJoinAndSelect('order.event', 'event')
+			.leftJoinAndSelect('order.referralCode', 'referralCode')
+			.leftJoinAndSelect('order.items', 'items')
+			.where('organization.id = :organizationId', { organizationId })
+			.orderBy('order.paidAt', 'DESC', 'NULLS LAST')
+			.addOrderBy('order.createdAt', 'DESC')
+			.skip((pagination.page - 1) * pagination.pageSize)
+			.take(pagination.pageSize);
+		if (query.search?.trim()) {
+			const search = `%${query.search.trim()}%`;
+			builder.andWhere(
+				new Brackets((qb) => {
+					qb.where('order.customerName ILIKE :search', { search })
+						.orWhere('order.customerEmail ILIKE :search', { search })
+						.orWhere('event.title ILIKE :search', { search })
+						.orWhere('referralCode.code ILIKE :search', { search });
+				}),
+			);
+		}
+		const [orders, total] = await builder.getManyAndCount();
+		return this.paginated(orders.map((order) => this.toOrderRow(order)), total, pagination.page, pagination.pageSize);
 	}
 
 	async orderDetail(organizationId: string, orderId: string, user: SalesUser) {
@@ -192,12 +221,22 @@ export class OrganizerSalesService {
 		return this.getAdjustedBalance(organizationId);
 	}
 
-	async listWithdrawalRequests(organizationId: string, user: SalesUser) {
+	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		return this.withdrawalRequestsRepository.find({
+		if (!this.hasPaginationQuery(query)) {
+			return this.withdrawalRequestsRepository.find({
+				where: { organization: { id: organizationId } },
+				order: { createdAt: 'DESC' },
+			});
+		}
+		const pagination = this.parsePagination(query);
+		const [items, total] = await this.withdrawalRequestsRepository.findAndCount({
 			where: { organization: { id: organizationId } },
 			order: { createdAt: 'DESC' },
+			skip: (pagination.page - 1) * pagination.pageSize,
+			take: pagination.pageSize,
 		});
+		return this.paginated(items, total, pagination.page, pagination.pageSize);
 	}
 
 	async requestWithdrawal(
@@ -445,22 +484,29 @@ export class OrganizerSalesService {
 			return saved;
 		} catch (error) {
 			const stripeMessage = error instanceof Error ? error.message : 'Stripe transfer failed.';
-			const message = this.friendlyStripeTransferError(stripeMessage);
+			const adminMessage = this.adminStripeTransferError(stripeMessage);
+			const userMessage = this.userFacingPayoutDelayMessage(stripeMessage);
 			await this.ledgerService.recordPayoutFailure(
 				organization.id,
 				entries,
 				amount,
 				currency,
-				message,
+				adminMessage,
 				user,
-				{ destination: organization.stripeAccountId, withdrawalRequestId: request.id, stripeErrorMessage: stripeMessage },
+				{
+					destination: organization.stripeAccountId,
+					withdrawalRequestId: request.id,
+					stripeErrorMessage: stripeMessage,
+					adminMessage,
+					userMessage,
+				},
 			);
 			request.status = 'failed';
 			request.failedAt = new Date();
-			request.adminNote = message;
-			request.metadata = { ...(request.metadata ?? {}), errorMessage: message, stripeErrorMessage: stripeMessage };
+			request.adminNote = userMessage;
+			request.metadata = { ...(request.metadata ?? {}), errorMessage: userMessage, userMessage, adminMessage, stripeErrorMessage: stripeMessage };
 			await this.withdrawalRequestsRepository.save(request);
-			await this.auditService.log('organizer_withdrawal.failed', user, 'withdrawal_request', request.id, { amount, currency, errorMessage: message }, { organizationId: organization.id });
+			await this.auditService.log('organizer_withdrawal.failed', user, 'withdrawal_request', request.id, { amount, currency, errorMessage: adminMessage }, { organizationId: organization.id });
 			await this.notifyAdmins('Venue Spice withdrawal payout failed', {
 				eyebrow: 'Payout failed',
 				title: 'Withdrawal payout failed',
@@ -469,7 +515,7 @@ export class OrganizerSalesService {
 				rows: [
 					{ label: 'Organizer', value: organization.name },
 					{ label: 'Amount', value: this.formatMoney(amount, currency) },
-					{ label: 'Reason', value: message },
+					{ label: 'Reason', value: adminMessage },
 				],
 				action: { label: 'Review withdrawals', url: this.adminUrl('/withdrawals') },
 			});
@@ -478,9 +524,9 @@ export class OrganizerSalesService {
 				title: 'Your payout needs review',
 				greeting: `Hello ${organization.name},`,
 				intro: `Your payout request for ${this.formatMoney(amount, currency)} could not be completed yet. Our team has been notified and will review it.`,
-				rows: [{ label: 'Reason', value: message }],
+				rows: [{ label: 'Reason', value: userMessage }],
 			});
-			throw new BadRequestException(message);
+			throw new BadRequestException(adminMessage);
 		}
 	}
 
@@ -608,6 +654,27 @@ export class OrganizerSalesService {
 			where: { organization: { id: organizationId } },
 			order: { paidAt: 'DESC', createdAt: 'DESC' },
 		});
+	}
+
+	private parsePagination(query: PaginationQuery) {
+		const page = Math.max(1, Number.parseInt(String(query.page ?? '1'), 10) || 1);
+		const requestedPageSize = Number.parseInt(String(query.pageSize ?? '8'), 10) || 8;
+		const pageSize = Math.min(50, Math.max(1, requestedPageSize));
+		return { page, pageSize };
+	}
+
+	private hasPaginationQuery(query: PaginationQuery) {
+		return Boolean(query.page ?? query.pageSize ?? query.search);
+	}
+
+	private paginated<T>(items: T[], total: number, page: number, pageSize: number) {
+		return {
+			items,
+			total,
+			page,
+			pageSize,
+			pageCount: Math.max(1, Math.ceil(total / pageSize)),
+		};
 	}
 
 	private toOrderRow(order: TicketOrderEntity) {
@@ -835,12 +902,20 @@ export class OrganizerSalesService {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN].includes(role);
 	}
 
-	private friendlyStripeTransferError(message: string) {
+	private adminStripeTransferError(message: string) {
 		const lower = message.toLowerCase();
 		if (lower.includes('insufficient funds') || lower.includes('balance is too low')) {
 			return 'Stripe balance is not enough to pay this withdrawal yet. Please fund the Stripe account or wait for pending Stripe balance to become available, then retry payout.';
 		}
 		return message || 'Stripe transfer failed. Please review the payout and try again.';
+	}
+
+	private userFacingPayoutDelayMessage(message: string) {
+		const lower = message.toLowerCase();
+		if (lower.includes('insufficient funds') || lower.includes('balance is too low') || lower.includes('stripe')) {
+			return 'Your payout is taking a little longer than expected. Our finance team has been notified and will complete it as soon as funds are available.';
+		}
+		return 'Your payout could not be completed yet. Our finance team has been notified and will review it.';
 	}
 
 	private async notifyAdmins(subject: string, options: Parameters<NotificationsService['buildBrandedEmail']>[0]) {

@@ -18,9 +18,13 @@ export class AgentsController {
 	@Get()
 	findAll(
 		@Query('organizationId') organizationId: string | undefined,
+		@Query('page') page: string | undefined,
+		@Query('pageSize') pageSize: string | undefined,
+		@Query('search') search: string | undefined,
+		@Query('status') status: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.agentsService.findAll(organizationId, req.user);
+		return this.agentsService.findAll(organizationId, req.user, { page, pageSize, search, status });
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)

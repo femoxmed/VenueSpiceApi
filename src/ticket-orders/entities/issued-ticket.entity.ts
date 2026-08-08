@@ -40,6 +40,9 @@ export class IssuedTicketEntity {
 	@Column({ name: 'checked_in_at', type: 'timestamptz', nullable: true })
 	checkedInAt?: Date | null;
 
+	@Column({ name: 'checked_in_by_user_id', type: 'uuid', nullable: true })
+	checkedInByUserId?: string | null;
+
 	@CreateDateColumn({ name: 'created_at' })
 	createdAt: Date;
 }

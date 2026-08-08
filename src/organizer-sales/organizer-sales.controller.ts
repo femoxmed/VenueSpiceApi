@@ -25,9 +25,12 @@ export class OrganizerSalesController {
 	@Get('orders')
 	orders(
 		@Query('organizationId') organizationId: string,
+		@Query('page') page: string | undefined,
+		@Query('pageSize') pageSize: string | undefined,
+		@Query('search') search: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.orders(organizationId, req.user);
+		return this.organizerSalesService.orders(organizationId, req.user, { page, pageSize, search });
 	}
 
 	@Get('orders/:id')
@@ -77,9 +80,11 @@ export class OrganizerSalesController {
 	@Get('withdrawal-requests')
 	withdrawalRequests(
 		@Query('organizationId') organizationId: string,
+		@Query('page') page: string | undefined,
+		@Query('pageSize') pageSize: string | undefined,
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.organizerSalesService.listWithdrawalRequests(organizationId, req.user);
+		return this.organizerSalesService.listWithdrawalRequests(organizationId, req.user, { page, pageSize });
 	}
 
 	@Post('withdrawal-requests')
