@@ -84,6 +84,12 @@ export class EventEntity {
 	@Column({ name: 'refund_cutoff_hours', type: 'int', default: 24 })
 	refundCutoffHours: number;
 
+	@Column({ name: 'refunds_allowed', type: 'boolean', default: true })
+	refundsAllowed: boolean;
+
+	@Column({ name: 'refundable_percentage', type: 'int', default: 100 })
+	refundablePercentage: number;
+
 	@OneToMany(() => TicketTypeEntity, (ticketType) => ticketType.event, {
 		cascade: true,
 		eager: true,

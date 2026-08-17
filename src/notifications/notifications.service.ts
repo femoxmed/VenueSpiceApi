@@ -3,6 +3,9 @@ import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { JobsOptions, Queue } from 'bullmq';
 import * as nodemailer from 'nodemailer';
+import { InjectRepository } from '@nestjs/typeorm';
+import { IsNull, Repository } from 'typeorm';
+import { NotificationEntity } from './entities/notification.entity';
 
 type EmailAction = {
 	label: string;
@@ -30,8 +33,55 @@ export class NotificationsService implements OnApplicationBootstrap {
 
 	constructor(
 		@InjectQueue('notifications') private readonly notificationsQueue: Queue,
+		@InjectRepository(NotificationEntity)
+		private readonly notificationsRepository: Repository<NotificationEntity>,
 		private readonly configService: ConfigService,
 	) {}
+
+	async createInAppNotification(input: {
+		userId: string;
+		type: string;
+		title: string;
+		message: string;
+		actionUrl?: string | null;
+		metadata?: Record<string, unknown> | null;
+	}) {
+		return this.notificationsRepository.save(
+			this.notificationsRepository.create({
+				userId: input.userId,
+				type: input.type,
+				title: input.title,
+				message: input.message,
+				actionUrl: input.actionUrl ?? null,
+				metadata: input.metadata ?? null,
+			}),
+		);
+	}
+
+	async listForUser(userId: string, limit = 20) {
+		const take = Math.min(50, Math.max(1, Number(limit) || 20));
+		const [items, unreadCount] = await Promise.all([
+			this.notificationsRepository.find({
+				where: { userId },
+				order: { createdAt: 'DESC' },
+				take,
+			}),
+			this.notificationsRepository.count({ where: { userId, readAt: IsNull() } }),
+		]);
+
+		return { items, unreadCount };
+	}
+
+	async markAllRead(userId: string) {
+		await this.notificationsRepository
+			.createQueryBuilder()
+			.update(NotificationEntity)
+			.set({ readAt: new Date() })
+			.where('user_id = :userId', { userId })
+			.andWhere('read_at IS NULL')
+			.execute();
+		return this.listForUser(userId);
+	}
 
 	async onApplicationBootstrap() {
 		const shouldSend =

@@ -26,4 +26,7 @@ export class TicketOrderItemEntity {
 
 	@Column({ name: 'line_total', type: 'decimal', precision: 12, scale: 2 })
 	lineTotal: number;
+
+	@Column({ name: 'attendee_details', type: 'jsonb', nullable: true })
+	attendeeDetails?: Array<{ name: string; email: string }> | null;
 }

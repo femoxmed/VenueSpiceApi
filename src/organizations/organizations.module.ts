@@ -8,9 +8,10 @@ import { VendorsController } from './vendors.controller';
 import { AuditModule } from '../audit/audit.module';
 import { UserEntity } from '../auth/entities/user.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 
 @Module({
-	imports: [TypeOrmModule.forFeature([OrganizationEntity, OrganizationMemberEntity, UserEntity]), AuditModule, NotificationsModule],
+	imports: [TypeOrmModule.forFeature([OrganizationEntity, OrganizationMemberEntity, UserEntity]), AuditModule, NotificationsModule, PlatformSettingsModule],
 	controllers: [OrganizationsController, VendorsController],
 	providers: [OrganizationsService],
 	exports: [OrganizationsService],

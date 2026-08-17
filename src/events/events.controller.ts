@@ -17,6 +17,11 @@ export class EventsController {
 		return this.eventsService.findPublic();
 	}
 
+	@Get('public/organizers/:username')
+	findPublicOrganizerProfile(@Param('username') username: string) {
+		return this.eventsService.findPublicOrganizerProfile(username);
+	}
+
 	@ApiBearerAuth()
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)

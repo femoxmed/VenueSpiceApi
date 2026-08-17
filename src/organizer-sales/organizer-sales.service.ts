@@ -700,6 +700,12 @@ export class OrganizerSalesService {
 			couponCode: order.referralCode?.code ?? this.feeSnapshotString(order, 'discountCode'),
 			ticketQuantity: lines.filter((line) => line.kind === 'ticket').reduce((sum, line) => sum + line.quantity, 0),
 			merchandiseQuantity: lines.filter((line) => line.kind === 'merchandise').reduce((sum, line) => sum + line.quantity, 0),
+			lineItems: lines.map((line) => ({
+				id: line.id,
+				kind: line.kind,
+				name: line.name,
+				quantity: line.quantity,
+			})),
 		};
 	}
 

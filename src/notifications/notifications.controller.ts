@@ -1,4 +1,4 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { IsEmail, IsString } from 'class-validator';
 
@@ -29,6 +29,19 @@ class QueueEmailDto {
 @Controller('notifications')
 export class NotificationsController {
 	constructor(private readonly notificationsService: NotificationsService) {}
+
+	@Get('mine')
+	listMine(
+		@Req() req: { user: { id: string } },
+		@Query('limit') limit?: string,
+	) {
+		return this.notificationsService.listForUser(req.user.id, Number(limit || 20));
+	}
+
+	@Post('read-all')
+	markAllRead(@Req() req: { user: { id: string } }) {
+		return this.notificationsService.markAllRead(req.user.id);
+	}
 
 	@Roles(Role.SUPER_ADMIN)
 	@Post('email')

@@ -7,6 +7,7 @@ import { OrganizationMemberEntity } from '../organizations/entities/organization
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { CheckInController } from './check-in.controller';
 import { CheckInService } from './check-in.service';
+import { TicketAssignmentHistoryEntity } from './entities/ticket-assignment-history.entity';
 
 @Module({
 	imports: [
@@ -16,6 +17,7 @@ import { CheckInService } from './check-in.service';
 			OrganizationEntity,
 			IssuedTicketEntity,
 			OrganizationMemberEntity,
+			TicketAssignmentHistoryEntity,
 		]),
 	],
 	controllers: [CheckInController],

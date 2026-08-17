@@ -35,6 +35,13 @@ cd "$APP_DIR"
 echo "[predeploy] App directory: $APP_DIR"
 echo "[predeploy] Database target: ${DB_HOST:-missing}/${DB_NAME:-missing} as ${DB_USERNAME:-missing}"
 
+if [ "${RESET_LIVE_CONFIRM:-}" = "WIPE_VENUE_SPICE_LIVE" ]; then
+  echo "[predeploy] RESET_LIVE_CONFIRM is set. Running guarded live database reset."
+  npm run reset:live
+  echo "[predeploy] Live database reset finished"
+  exit 0
+fi
+
 if [ "${SEED_VENDOR_CATEGORIES_ON_DEPLOY:-true}" = "false" ]; then
   echo "[predeploy] Skipping vendor category seed because SEED_VENDOR_CATEGORIES_ON_DEPLOY=false"
 else

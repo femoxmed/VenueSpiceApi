@@ -36,16 +36,12 @@ import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
 
 dotenv.config();
 
-const password = 'password123*';
+const password = process.env.SUPER_ADMIN_PASSWORD || 'Password123*';
 
 const superAdmins = [
 	{
-		email: 'venuespice.us@gmail.com',
-		fullName: 'Venue Spice Super Admin',
-	},
-	{
-		email: 'exemblar@gmail.com',
-		fullName: 'Exemblar Super Admin',
+		email: process.env.SUPER_ADMIN_EMAIL || 'venuespice.us@gmail.com',
+		fullName: process.env.SUPER_ADMIN_NAME || 'Venue Spice Super Admin',
 	},
 ];
 

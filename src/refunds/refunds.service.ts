@@ -9,6 +9,7 @@ import { Role } from '../common/enums/role.enum';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
+import { NotificationsService } from '../notifications/notifications.service';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { CreateRefundRequestDto } from './dto/create-refund-request.dto';
@@ -43,6 +44,7 @@ export class RefundsService {
 		private readonly paymentIntentsRepository: Repository<PaymentIntentEntity>,
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
+		private readonly notificationsService: NotificationsService,
 	) {}
 
 	async createRequest(dto: CreateRefundRequestDto) {
@@ -67,7 +69,7 @@ export class RefundsService {
 				orderId: order.id,
 				customerEmail: order.customerEmail,
 				reason: dto.reason?.trim() || null,
-				amount: Number(order.total || 0),
+				amount: this.calculateRefundAmount(order),
 				currency: order.currency,
 				status: 'requested',
 			}),
@@ -81,6 +83,8 @@ export class RefundsService {
 			{ after: this.pickRefundAuditFields(refund) },
 			{ orderId: order.id, customerEmail: order.customerEmail },
 		);
+
+		await this.notifyOrganizer(refund, 'requested');
 
 		return refund;
 	}
@@ -133,6 +137,7 @@ export class RefundsService {
 			{ orderId: refund.order.id, stripeRefundId: saved.stripeRefundId },
 			request,
 		);
+		await this.notifyOrganizer(saved, 'approved');
 		return saved;
 	}
 
@@ -164,6 +169,7 @@ export class RefundsService {
 			{ orderId: refund.order.id },
 			request,
 		);
+		await this.notifyOrganizer(saved, 'declined');
 		return saved;
 	}
 
@@ -183,6 +189,12 @@ export class RefundsService {
 		if ((order.tickets || []).some((ticket) => ticket.status === 'checked_in')) {
 			throw new BadRequestException('Checked-in tickets cannot be refunded');
 		}
+		if (order.event?.refundsAllowed === false) {
+			throw new BadRequestException('This event does not allow buyer-requested refunds');
+		}
+		if (this.calculateRefundAmount(order) <= 0) {
+			throw new BadRequestException('This event does not have a refundable amount available');
+		}
 		const cutoffHours = Number(order.event?.refundCutoffHours ?? 24);
 		const eventStart = order.event?.startsAt ? new Date(order.event.startsAt) : null;
 		if (eventStart) {
@@ -195,11 +207,13 @@ export class RefundsService {
 
 	private async createStripeRefund(order: TicketOrderEntity) {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
+		const refundAmount = this.calculateRefundAmount(order);
+		const refundAmountCents = Math.round(refundAmount * 100);
 		if (!secretKey || !order.stripePaymentIntentId || order.stripePaymentIntentId.startsWith('txn_')) {
 			return {
 				id: `local_refund_${order.id}`,
 				status: 'succeeded',
-				amount: Math.round(Number(order.total || 0) * 100),
+				amount: refundAmountCents,
 				currency: order.currency.toLowerCase(),
 				payment_intent: order.stripePaymentIntentId ?? `local_${order.id}`,
 				reverse_transfer: true,
@@ -209,11 +223,13 @@ export class RefundsService {
 
 		const params = new URLSearchParams();
 		params.set('payment_intent', order.stripePaymentIntentId);
+		params.set('amount', String(refundAmountCents));
 		params.set('reverse_transfer', 'true');
 		params.set('refund_application_fee', 'true');
 		params.set('metadata[ticketOrderId]', order.id);
 		params.set('metadata[reverseTransfer]', 'true');
 		params.set('metadata[refundApplicationFee]', 'true');
+		params.set('metadata[refundablePercentage]', String(order.event?.refundablePercentage ?? 100));
 
 		const response = await fetch('https://api.stripe.com/v1/refunds', {
 			method: 'POST',
@@ -228,6 +244,95 @@ export class RefundsService {
 			throw new BadRequestException(payload.error?.message ?? 'Stripe refund failed');
 		}
 		return payload;
+	}
+
+	private calculateRefundAmount(order: TicketOrderEntity) {
+		const percentage = Math.min(100, Math.max(0, Number(order.event?.refundablePercentage ?? 100)));
+		return Math.round(Number(order.total || 0) * (percentage / 100) * 100) / 100;
+	}
+
+	private async notifyOrganizer(refund: RefundRequestEntity, state: 'requested' | 'approved' | 'declined') {
+		const organization = refund.order?.organization;
+		const ownerUserId = organization?.ownerUserId;
+		const owner = ownerUserId ? await this.usersRepository.findOne({ where: { id: ownerUserId } }) : null;
+		const recipientEmail = owner?.email || organization?.contactEmail || organization?.businessEmail;
+		const eventTitle = refund.order?.event?.title || 'your event';
+		const amount = this.formatCurrency(Number(refund.amount || 0), refund.currency);
+		const dashboardUrl = this.buildDashboardUrl('/dashboard/sales');
+		const config = {
+			requested: {
+				type: 'refund.requested',
+				subject: `Refund request received for ${eventTitle}`,
+				title: 'Refund request received',
+				message: `${refund.customerEmail} requested a ${amount} refund for ${eventTitle}.`,
+				intro: 'A buyer submitted a refund request. Review it against the event policy, ticket status, and order details before a decision is made.',
+			},
+			approved: {
+				type: 'refund.approved',
+				subject: `Refund approved for ${eventTitle}`,
+				title: 'Refund approved',
+				message: `${amount} was refunded to ${refund.customerEmail} for ${eventTitle}.`,
+				intro: 'A refund has been approved and the related tickets/order have been marked as refunded.',
+			},
+			declined: {
+				type: 'refund.declined',
+				subject: `Refund declined for ${eventTitle}`,
+				title: 'Refund declined',
+				message: `Refund request from ${refund.customerEmail} for ${eventTitle} was declined.`,
+				intro: 'A refund request has been declined. The order remains active unless another review action is taken.',
+			},
+		}[state];
+
+		if (ownerUserId) {
+			await this.notificationsService.createInAppNotification({
+				userId: ownerUserId,
+				type: config.type,
+				title: config.title,
+				message: config.message,
+				actionUrl: '/dashboard/sales',
+				metadata: {
+					refundRequestId: refund.id,
+					orderId: refund.orderId,
+					eventId: refund.order?.event?.id,
+					amount: Number(refund.amount || 0),
+					currency: refund.currency,
+					status: refund.status,
+				},
+			});
+		}
+
+		if (!recipientEmail) return;
+		await this.notificationsService.queueEmail(
+			recipientEmail,
+			config.subject,
+			this.notificationsService.buildBrandedEmail({
+				eyebrow: 'Refund update',
+				title: config.title,
+				greeting: `Hello ${organization?.name || 'there'},`,
+				intro: config.intro,
+				rows: [
+					{ label: 'Event', value: eventTitle },
+					{ label: 'Order', value: refund.orderId },
+					{ label: 'Buyer', value: refund.customerEmail },
+					{ label: 'Amount', value: amount },
+					{ label: 'Status', value: refund.status },
+				],
+				action: dashboardUrl ? { label: 'Open sales dashboard', url: dashboardUrl } : undefined,
+				note: refund.reason ? `Buyer reason: ${refund.reason}` : undefined,
+			}),
+		);
+	}
+
+	private buildDashboardUrl(path: string) {
+		const base = this.configService.get<string>('FRONTEND_URL', '').replace(/\/$/, '');
+		return base ? `${base}${path.startsWith('/') ? path : `/${path}`}` : path;
+	}
+
+	private formatCurrency(value: number, currency = 'USD') {
+		return new Intl.NumberFormat('en-US', {
+			style: 'currency',
+			currency: currency || 'USD',
+		}).format(Number(value || 0));
 	}
 
 	private async markOrderRefunded(order: TicketOrderEntity) {

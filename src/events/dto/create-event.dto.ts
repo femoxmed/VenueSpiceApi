@@ -3,6 +3,8 @@ import {
 	IsBoolean,
 	IsDateString,
 	IsInt,
+	Max,
+	Min,
 	IsNumber,
 	IsObject,
 	IsOptional,
@@ -29,6 +31,30 @@ export class CreateTicketTypeDto {
 	@IsOptional()
 	@IsInt()
 	limitPerPerson?: number;
+
+	@IsOptional()
+	@IsIn(['single', 'group'])
+	admissionType?: 'single' | 'group';
+
+	@IsOptional()
+	@IsInt()
+	groupSize?: number;
+
+	@IsOptional()
+	@IsBoolean()
+	collectGroupAttendeeDetails?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	attendeeDetailsRequired?: boolean;
+
+	@IsOptional()
+	@IsDateString()
+	salesStartAt?: string;
+
+	@IsOptional()
+	@IsDateString()
+	salesEndAt?: string;
 
 	@IsOptional()
 	@IsString()
@@ -124,7 +150,18 @@ export class CreateEventDto {
 
 	@IsOptional()
 	@IsInt()
+	@Min(0)
 	refundCutoffHours?: number;
+
+	@IsOptional()
+	@IsBoolean()
+	refundsAllowed?: boolean;
+
+	@IsOptional()
+	@IsInt()
+	@Min(0)
+	@Max(100)
+	refundablePercentage?: number;
 
 	@IsOptional()
 	@IsArray()

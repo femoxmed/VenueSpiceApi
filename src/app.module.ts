@@ -71,6 +71,8 @@ import { RefundRequestEntity } from './refunds/entities/refund-request.entity';
 import { PlatformSettingEntity } from './platform-settings/entities/platform-setting.entity';
 import { FinancialLedgerEntryEntity } from './financial-ledger/entities/financial-ledger-entry.entity';
 import { WithdrawalRequestEntity } from './organizer-sales/entities/withdrawal-request.entity';
+import { NotificationEntity } from './notifications/entities/notification.entity';
+import { TicketAssignmentHistoryEntity } from './check-in/entities/ticket-assignment-history.entity';
 import { DatabaseModule } from './database/database.module';
 
 function isEnabled(value?: string | boolean | number | null) {
@@ -152,6 +154,8 @@ function getBullQueuePrefix(value?: string | null) {
 					PlatformSettingEntity,
 					FinancialLedgerEntryEntity,
 					WithdrawalRequestEntity,
+					NotificationEntity,
+					TicketAssignmentHistoryEntity,
 				],
 			}),
 		}),

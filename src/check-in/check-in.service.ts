@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
@@ -8,6 +8,8 @@ import { OrganizationEntity } from '../organizations/entities/organization.entit
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { ScanTicketDto } from './dto/scan-ticket.dto';
+import { UpdateTicketHolderDto } from './dto/update-ticket-holder.dto';
+import { TicketAssignmentHistoryEntity } from './entities/ticket-assignment-history.entity';
 
 type CheckInUser = { id: string; email?: string; role: Role };
 
@@ -22,6 +24,8 @@ export class CheckInService {
 		private readonly issuedTicketsRepository: Repository<IssuedTicketEntity>,
 		@InjectRepository(OrganizationMemberEntity)
 		private readonly organizationMembersRepository: Repository<OrganizationMemberEntity>,
+		@InjectRepository(TicketAssignmentHistoryEntity)
+		private readonly ticketAssignmentHistoryRepository: Repository<TicketAssignmentHistoryEntity>,
 		private readonly auditService: AuditService,
 	) {}
 
@@ -287,6 +291,85 @@ export class CheckInService {
 		};
 	}
 
+	async updateTicketHolder(ticketId: string, dto: UpdateTicketHolderDto, user: CheckInUser) {
+		const ticket = await this.issuedTicketsRepository.findOne({
+			where: { id: ticketId },
+			relations: ['event', 'event.organization', 'ticketType', 'order'],
+		});
+		if (!ticket) {
+			throw new ForbiddenException('You do not have access to this ticket.');
+		}
+
+		await this.ensureOrganizationAccess(ticket.event.organization.id, user);
+
+		if (['checked_in', 'void', 'refunded'].includes(ticket.status)) {
+			throw new BadRequestException('This ticket can no longer be reassigned.');
+		}
+
+		const holderName = String(dto.holderName || '').trim();
+		const holderEmail = String(dto.holderEmail || '').trim().toLowerCase();
+		const note = String(dto.note || '').trim() || null;
+
+		if (!holderName || !holderEmail) {
+			throw new BadRequestException('Name and email are required.');
+		}
+
+		const previous = {
+			holderName: ticket.holderName,
+			holderEmail: ticket.holderEmail,
+		};
+
+		if (
+			previous.holderName.trim() === holderName &&
+			previous.holderEmail.trim().toLowerCase() === holderEmail
+		) {
+			return this.mapTicketWithHistory(ticket, await this.getTicketHistory(ticket.id));
+		}
+
+		const history = this.ticketAssignmentHistoryRepository.create({
+			ticket,
+			event: ticket.event,
+			orderId: ticket.order?.id,
+			previousHolderName: ticket.holderName,
+			previousHolderEmail: ticket.holderEmail,
+			newHolderName: holderName,
+			newHolderEmail: holderEmail,
+			changedByUserId: user.id,
+			changedByEmail: user.email || null,
+			note,
+		});
+		await this.ticketAssignmentHistoryRepository.save(history);
+
+		ticket.holderName = holderName;
+		ticket.holderEmail = holderEmail;
+		const saved = await this.issuedTicketsRepository.save(ticket);
+
+		await this.auditService.log('ticket.reassigned', user, 'issued_ticket', saved.id, {
+			holderName: { from: previous.holderName, to: holderName },
+			holderEmail: { from: previous.holderEmail, to: holderEmail },
+		}, {
+			eventId: saved.event?.id,
+			organizationId: saved.event?.organization?.id,
+			orderId: saved.order?.id,
+			note,
+		});
+
+		return this.mapTicketWithHistory(saved, await this.getTicketHistory(saved.id));
+	}
+
+	async ticketAssignmentHistory(ticketId: string, user: CheckInUser) {
+		const ticket = await this.issuedTicketsRepository.findOne({
+			where: { id: ticketId },
+			relations: ['event', 'event.organization'],
+		});
+		if (!ticket) {
+			throw new ForbiddenException('You do not have access to this ticket.');
+		}
+
+		await this.ensureOrganizationAccess(ticket.event.organization.id, user);
+		return this.getTicketHistory(ticket.id);
+	}
+
 	private async getEventForCheckIn(eventId: string, user: CheckInUser) {
 		const event = await this.eventsRepository.findOne({
 			where: { id: eventId },
@@ -357,6 +440,35 @@ export class CheckInService {
 			orderId: ticket.order?.id,
 			checkedInAt: ticket.checkedInAt,
 			checkedInByUserId: ticket.checkedInByUserId,
+		};
+	}
+
+	private async getTicketHistory(ticketId: string) {
+		const history = await this.ticketAssignmentHistoryRepository.find({
+			where: { ticket: { id: ticketId } },
+			order: { createdAt: 'DESC' },
+		});
+		return history.map((item) => this.mapTicketAssignmentHistory(item));
+	}
+
+	private mapTicketWithHistory(ticket: IssuedTicketEntity, history: ReturnType<CheckInService['mapTicketAssignmentHistory']>[]) {
+		return {
+			...this.mapTicket(ticket),
+			assignmentHistory: history,
+		};
+	}
+
+	private mapTicketAssignmentHistory(item: TicketAssignmentHistoryEntity) {
+		return {
+			id: item.id,
+			previousHolderName: item.previousHolderName,
+			previousHolderEmail: item.previousHolderEmail,
+			newHolderName: item.newHolderName,
+			newHolderEmail: item.newHolderEmail,
+			changedByUserId: item.changedByUserId,
+			changedByEmail: item.changedByEmail,
+			note: item.note,
+			createdAt: item.createdAt,
 		};
 	}
 }

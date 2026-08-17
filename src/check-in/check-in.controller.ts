@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
@@ -6,6 +6,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CheckInService } from './check-in.service';
 import { ScanTicketDto } from './dto/scan-ticket.dto';
+import { UpdateTicketHolderDto } from './dto/update-ticket-holder.dto';
 
 @ApiTags('Check In')
 @ApiBearerAuth()
@@ -66,5 +67,22 @@ export class CheckInController {
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
 		return this.checkInService.lookup(dto, req.user);
+	}
+
+	@Patch('tickets/:ticketId/holder')
+	updateTicketHolder(
+		@Param('ticketId') ticketId: string,
+		@Body() dto: UpdateTicketHolderDto,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.checkInService.updateTicketHolder(ticketId, dto, req.user);
+	}
+
+	@Get('tickets/:ticketId/history')
+	ticketAssignmentHistory(
+		@Param('ticketId') ticketId: string,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.checkInService.ticketAssignmentHistory(ticketId, req.user);
 	}
 }

@@ -11,6 +11,8 @@
     "seed:blogs:dev": "ts-node src/seed-blogs.ts",
     "seed:vendor-categories": "node dist/seed-vendor-categories.js",
     "seed:vendor-categories:dev": "ts-node src/seed-vendor-categories.ts",
+    "reset:live": "node dist/reset-live-data.js",
+    "reset:live:dev": "ts-node src/reset-live-data.ts",
     "sync:super-admins": "node dist/sync-super-admins.js",
     "sync:super-admins:dev": "ts-node src/sync-super-admins.ts",
     "typeorm": "typeorm-ts-node-commonjs -d src/database/database.module.ts"

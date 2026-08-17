@@ -84,6 +84,67 @@ export class EventsService {
 		return this.toPublicEvent(event);
 	}
 
+	async findPublicOrganizerProfile(username: string) {
+		const normalized = username.trim().replace(/^@+/, '').toLowerCase();
+		if (!normalized) throw new NotFoundException('Organizer not found');
+
+		const organization = await this.organizationsRepository.findOne({
+			where: [
+				{ organizerUsername: normalized, status: 'active' },
+				{ slug: normalized, status: 'active' },
+			],
+		});
+		if (!organization || organization.type !== 'organization') {
+			throw new NotFoundException('Organizer not found');
+		}
+
+		const now = new Date();
+		const events = await this.eventsRepository
+			.createQueryBuilder('event')
+			.leftJoinAndSelect('event.organization', 'organization')
+			.leftJoinAndSelect('event.ticketTypes', 'ticketTypes')
+			.where('event.status = :status', { status: 'published' })
+			.andWhere('organization.id = :organizationId', { organizationId: organization.id })
+			.orderBy('event.startsAt', 'ASC')
+			.addOrderBy('event.createdAt', 'DESC')
+			.getMany();
+
+		const publicEvents = events.map((event) => this.toPublicEvent(event));
+		const upcomingEvents = publicEvents.filter((event) => {
+			const endTime = event.endsAt ? new Date(event.endsAt).getTime() : new Date(event.startsAt).getTime();
+			return endTime >= now.getTime();
+		});
+		const pastEvents = publicEvents
+			.filter((event) => {
+				const endTime = event.endsAt ? new Date(event.endsAt).getTime() : new Date(event.startsAt).getTime();
+				return endTime < now.getTime();
+			})
+			.reverse();
+
+		return {
+			organizer: {
+				id: organization.id,
+				name: organization.name,
+				slug: organization.slug,
+				organizerUsername: organization.organizerUsername,
+				logoUrl: organization.logoUrl,
+				coverImageUrls: organization.coverImageUrls || [],
+				description: organization.description,
+				website: organization.website,
+				country: organization.country,
+				stateProvince: organization.stateProvince,
+				businessCategory: organization.businessCategory,
+			},
+			stats: {
+				upcomingEvents: upcomingEvents.length,
+				pastEvents: pastEvents.length,
+				totalPublishedEvents: publicEvents.length,
+			},
+			upcomingEvents,
+			pastEvents,
+		};
+	}
+
 	async findOne(idOrSlug: string, user?: { id: string; role: Role }) {
 		const event = await this.eventsRepository.findOne({
 			where: [{ id: idOrSlug }, { slug: idOrSlug }],
@@ -112,6 +173,7 @@ export class EventsService {
 		const startsAt = new Date(dto.startsAt);
 		const endsAt = dto.endsAt ? new Date(dto.endsAt) : null;
 		this.validateCreateDate(startsAt);
+		this.validateTicketSalesWindowsForEvent(dto.ticketTypes || [], endsAt || startsAt);
 		this.validateDraftTransition({
 			currentStatus: 'draft',
 			nextStatus: dto.status || 'draft',
@@ -126,6 +188,9 @@ export class EventsService {
 			startsAt,
 			endsAt,
 			organization,
+			refundsAllowed: dto.refundsAllowed ?? true,
+			refundCutoffHours: this.normalizeRefundCutoffHours(dto.refundCutoffHours),
+			refundablePercentage: this.normalizeRefundablePercentage(dto.refundablePercentage),
 			ticketTypes: dto.ticketTypes || [],
 			imageUrls: dto.imageUrls || [],
 			socialLinks: dto.socialLinks || {},
@@ -152,6 +217,7 @@ export class EventsService {
 		const { ticketTypes, ...eventPatch } = dto;
 		const nextStartsAt = dto.startsAt ? new Date(dto.startsAt) : event.startsAt;
 		const nextEndsAt = dto.endsAt ? new Date(dto.endsAt) : event.endsAt || nextStartsAt;
+		this.validateTicketSalesWindowsForEvent(dto.ticketTypes || [], nextEndsAt);
 		this.validateDraftTransition({
 			currentStatus: event.status,
 			nextStatus: dto.status || event.status,
@@ -167,6 +233,12 @@ export class EventsService {
 					price: Number(ticket.price || 0),
 					quantity: Number(ticket.quantity || 0),
 					limitPerPerson: ticket.limitPerPerson ?? undefined,
+					admissionType: ticket.admissionType ?? 'single',
+					groupSize: ticket.groupSize ?? undefined,
+					attendeeDetailsRequired: Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails),
+					collectGroupAttendeeDetails: ticket.admissionType === 'group' ? Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails) : false,
+					salesStartAt: ticket.salesStartAt ? ticket.salesStartAt.toISOString() : undefined,
+					salesEndAt: ticket.salesEndAt ? ticket.salesEndAt.toISOString() : undefined,
 					description: ticket.description ?? undefined,
 					includeCharges: ticket.includeCharges,
 				})),
@@ -179,6 +251,9 @@ export class EventsService {
 			...eventPatch,
 			startsAt: nextStartsAt,
 			endsAt: nextEndsAt,
+			refundsAllowed: dto.refundsAllowed ?? event.refundsAllowed,
+			refundCutoffHours: dto.refundCutoffHours !== undefined ? this.normalizeRefundCutoffHours(dto.refundCutoffHours) : event.refundCutoffHours,
+			refundablePercentage: dto.refundablePercentage !== undefined ? this.normalizeRefundablePercentage(dto.refundablePercentage) : event.refundablePercentage,
 			imageUrls: dto.imageUrls ?? event.imageUrls,
 			socialLinks: dto.socialLinks ?? event.socialLinks,
 			appearances: dto.appearances ?? event.appearances,
@@ -233,6 +308,12 @@ export class EventsService {
 					price: ticket.price,
 					quantity: ticket.quantity,
 					limitPerPerson: ticket.limitPerPerson ?? null,
+					admissionType: ticket.admissionType ?? existing.admissionType ?? 'single',
+					groupSize: ticket.admissionType === 'group' ? Math.max(2, Number(ticket.groupSize || existing.groupSize || 2)) : null,
+					attendeeDetailsRequired: Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails),
+					collectGroupAttendeeDetails: ticket.admissionType === 'group' ? Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails) : false,
+					salesStartAt: this.toDateOrNull(ticket.salesStartAt),
+					salesEndAt: this.toDateOrNull(ticket.salesEndAt),
 					description: ticket.description ?? null,
 					includeCharges: ticket.includeCharges ?? false,
 					status: Number(ticket.quantity) <= Number(existing.quantitySold || 0) ? 'sold_out' : existing.status === 'sold_out' ? 'active' : existing.status,
@@ -240,7 +321,16 @@ export class EventsService {
 				usedExistingIds.add(existing.id);
 				nextTypes.push(existing);
 			} else {
-				nextTypes.push(this.ticketTypesRepository.create({ ...ticket, event }));
+				nextTypes.push(this.ticketTypesRepository.create({
+					...ticket,
+					admissionType: ticket.admissionType ?? 'single',
+					groupSize: ticket.admissionType === 'group' ? Math.max(2, Number(ticket.groupSize || 2)) : null,
+					attendeeDetailsRequired: Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails),
+					collectGroupAttendeeDetails: ticket.admissionType === 'group' ? Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails) : false,
+					salesStartAt: this.toDateOrNull(ticket.salesStartAt),
+					salesEndAt: this.toDateOrNull(ticket.salesEndAt),
+					event,
+				}));
 			}
 		}
 
@@ -264,6 +354,7 @@ export class EventsService {
 	private validatePricing(dto: Partial<CreateEventDto>) {
 		dto.ticketTypes?.forEach((ticket, index) => {
 			this.validatePaidMinimum(ticket.price, `ticketTypes[${index}].price`);
+			this.validateTicketSalesWindow(ticket, `ticketTypes[${index}]`);
 		});
 
 		dto.addOns?.forEach((addOn, index) => {
@@ -294,7 +385,9 @@ export class EventsService {
 			appearances: this.stableJson(event.appearances || []),
 			addOns: this.stableJson(event.addOns || []),
 			status: event.status,
+			refundsAllowed: event.refundsAllowed,
 			refundCutoffHours: event.refundCutoffHours,
+			refundablePercentage: event.refundablePercentage,
 			ticketTypes: this.stableJson(
 				(event.ticketTypes || []).map((ticket) => ({
 					id: ticket.id,
@@ -303,6 +396,12 @@ export class EventsService {
 					quantity: Number(ticket.quantity || 0),
 					quantitySold: Number(ticket.quantitySold || 0),
 					limitPerPerson: ticket.limitPerPerson,
+					admissionType: ticket.admissionType ?? 'single',
+					groupSize: ticket.groupSize,
+					attendeeDetailsRequired: Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails),
+					collectGroupAttendeeDetails: ticket.admissionType === 'group' ? Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails) : false,
+					salesStartAt: this.toIsoOrNull(ticket.salesStartAt),
+					salesEndAt: this.toIsoOrNull(ticket.salesEndAt),
 					description: ticket.description,
 					includeCharges: ticket.includeCharges,
 					status: ticket.status,
@@ -327,6 +426,12 @@ export class EventsService {
 		return Number.isNaN(date.getTime()) ? null : date.toISOString();
 	}
 
+	private toDateOrNull(value?: Date | string | null) {
+		if (!value) return null;
+		const date = value instanceof Date ? value : new Date(value);
+		return Number.isNaN(date.getTime()) ? null : date;
+	}
+
 	private stableJson(value: unknown) {
 		return JSON.stringify(value ?? null);
 	}
@@ -339,6 +444,29 @@ export class EventsService {
 		if (price > 0 && price < MIN_PAID_PRICE) {
 			throw new BadRequestException(`${field} must be 0 for free or at least $1.00 for paid items`);
 		}
+	}
+
+	private validateTicketSalesWindow(ticket: { salesStartAt?: string | Date | null; salesEndAt?: string | Date | null }, field: string) {
+		const startsAt = this.toDateOrNull(ticket.salesStartAt);
+		const endsAt = this.toDateOrNull(ticket.salesEndAt);
+		if (ticket.salesStartAt && !startsAt) {
+			throw new BadRequestException(`${field}.salesStartAt must be a valid date`);
+		}
+		if (ticket.salesEndAt && !endsAt) {
+			throw new BadRequestException(`${field}.salesEndAt must be a valid date`);
+		}
+		if (startsAt && endsAt && endsAt.getTime() <= startsAt.getTime()) {
+			throw new BadRequestException(`${field}.salesEndAt must be after salesStartAt`);
+		}
+	}
+
+	private validateTicketSalesWindowsForEvent(ticketTypes: NonNullable<CreateEventDto['ticketTypes']>, eventEndsAt: Date) {
+		ticketTypes.forEach((ticket, index) => {
+			const salesEndAt = this.toDateOrNull(ticket.salesEndAt);
+			if (salesEndAt && eventEndsAt && salesEndAt.getTime() > eventEndsAt.getTime()) {
+				throw new BadRequestException(`ticketTypes[${index}].salesEndAt cannot be after the event end date`);
+			}
+		});
 	}
 
 	private async validatePaidEventPayoutReadiness(dto: Partial<CreateEventDto>, organization: OrganizationEntity) {
@@ -408,6 +536,18 @@ export class EventsService {
 
 	private isExpired(value: Date) {
 		return value.getTime() < Date.now();
+	}
+
+	private normalizeRefundCutoffHours(value?: number | null) {
+		const numeric = Number(value ?? 24);
+		if (!Number.isFinite(numeric)) return 24;
+		return Math.max(0, Math.floor(numeric));
+	}
+
+	private normalizeRefundablePercentage(value?: number | null) {
+		const numeric = Number(value ?? 100);
+		if (!Number.isFinite(numeric)) return 100;
+		return Math.min(100, Math.max(0, Math.floor(numeric)));
 	}
 
 	private toPublicEvent(event: EventEntity) {

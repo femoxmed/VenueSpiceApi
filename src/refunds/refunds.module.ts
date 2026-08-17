@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { UserEntity } from '../auth/entities/user.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
@@ -23,6 +24,7 @@ import { RefundsService } from './refunds.service';
 			PaymentIntentEntity,
 		]),
 		AuditModule,
+		NotificationsModule,
 	],
 	controllers: [RefundsController],
 	providers: [RefundsService],

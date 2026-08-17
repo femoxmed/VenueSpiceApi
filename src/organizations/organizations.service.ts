@@ -13,6 +13,8 @@ import { Request } from 'express';
 import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { UpdateOrganizationDealDto } from './dto/update-organization-deal.dto';
 
 type MockStripeOnboardingDto = {
 	businessType?: string;
@@ -159,6 +161,7 @@ export class OrganizationsService {
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
 		private readonly notificationsService: NotificationsService,
+		private readonly platformSettingsService: PlatformSettingsService,
 	) {}
 
 	findAll() {
@@ -311,6 +314,53 @@ export class OrganizationsService {
 			{ updatedFields: Object.keys(dto) },
 			request,
 		);
+		return saved;
+	}
+
+	async updateDeal(
+		id: string,
+		dto: UpdateOrganizationDealDto,
+		user?: { id: string; email?: string; role?: string },
+		request?: Request,
+	) {
+		const organization = await this.findOne(id);
+		if (organization.type !== 'organization') {
+			throw new BadRequestException('Deals can only be applied to event organizer accounts.');
+		}
+
+		const startsAt = new Date(dto.startsAt);
+		const endsAt = new Date(dto.endsAt);
+		if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) {
+			throw new BadRequestException('Enter a valid start and expiry date.');
+		}
+		if (startsAt >= endsAt) {
+			throw new BadRequestException('Deal expiry date must be after the start date.');
+		}
+
+		const before = this.pickOrganizationAuditFields(organization);
+		const normalPricing = await this.platformSettingsService.getPricingSettings();
+		organization.dealVenueSpiceFeePercent = dto.venueSpiceFeePercent;
+		organization.dealVenueSpiceFeeFixed = dto.venueSpiceFeeFixed;
+		organization.dealStartsAt = startsAt;
+		organization.dealEndsAt = endsAt;
+
+		const saved = await this.organizationsRepository.save(organization);
+		const after = this.pickOrganizationAuditFields(saved);
+
+		await this.auditService.log(
+			'organization.deal.updated',
+			user,
+			'organization',
+			saved.id,
+			this.buildChanges(before, after),
+			{ notifyOrganizer: Boolean(dto.notifyOrganizer), normalPricing },
+			request,
+		);
+
+		if (dto.notifyOrganizer) {
+			await this.notifyOrganizerDeal(saved, normalPricing);
+		}
+
 		return saved;
 	}
 
@@ -512,7 +562,68 @@ export class OrganizationsService {
 			stateProvince: organization.stateProvince,
 			website: organization.website,
 			vendorProfileCompletedAt: organization.vendorProfileCompletedAt,
+			dealVenueSpiceFeePercent: organization.dealVenueSpiceFeePercent,
+			dealVenueSpiceFeeFixed: organization.dealVenueSpiceFeeFixed,
+			dealStartsAt: organization.dealStartsAt,
+			dealEndsAt: organization.dealEndsAt,
 		};
+	}
+
+	private async notifyOrganizerDeal(
+		organization: OrganizationEntity,
+		normalPricing: Awaited<ReturnType<PlatformSettingsService['getPricingSettings']>>,
+	) {
+		const owner = organization.ownerUserId
+			? await this.usersRepository.findOne({ where: { id: organization.ownerUserId } })
+			: null;
+		const to = organization.contactEmail || organization.businessEmail || owner?.email;
+		if (!to) return;
+
+		const dashboardUrl = this.configService.get<string>('FRONTEND_DASHBOARD_URL')
+			|| `${this.configService.get<string>('WEB_APP_URL', 'http://localhost:3000').replace(/\/$/, '')}/dashboard`;
+		const discountedPercent = Number(organization.dealVenueSpiceFeePercent ?? 0);
+		const discountedFixed = Number(organization.dealVenueSpiceFeeFixed ?? 0);
+		const normalPercent = Number(normalPricing.venueSpiceFeePercent ?? 0);
+		const normalFixed = Number(normalPricing.venueSpiceFeeFixed ?? 0);
+
+		await this.notificationsService.queueEmail(
+			to,
+			'Your Venue Spice welcome package is active',
+			this.notificationsService.buildBrandedEmail({
+				eyebrow: 'Organizer welcome package',
+				title: 'A special Venue Spice deal for your events',
+				greeting: `Hello ${organization.name},`,
+				intro:
+					'We have added a limited-time discounted service fee package to your event organizer account.',
+				body:
+					'<p>This is our way of helping you get your next event live, sell tickets confidently, and keep more of your early ticket revenue while you settle into Venue Spice.</p>',
+				rows: [
+					{ label: 'Normal Venue Spice fee', value: `${this.formatDealPercent(normalPercent)} + ${this.formatDealMoney(normalFixed)} per paid ticket` },
+					{ label: 'Your discounted fee', value: `${this.formatDealPercent(discountedPercent)} + ${this.formatDealMoney(discountedFixed)} per paid ticket` },
+					{ label: 'Starts', value: organization.dealStartsAt ?? new Date() },
+					{ label: 'Expires', value: organization.dealEndsAt ?? new Date() },
+				],
+				action: {
+					label: 'Open organizer dashboard',
+					url: dashboardUrl,
+				},
+				note:
+					'This discount applies automatically to eligible paid ticket and add-on checkouts during the stated period. Stripe processing fees, taxes, refunds, and other external charges are not changed by this package.',
+			}),
+		);
+	}
+
+	private formatDealPercent(value: number) {
+		return `${(value * 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
+	}
+
+	private formatDealMoney(value: number) {
+		return new Intl.NumberFormat('en-US', {
+			style: 'currency',
+			currency: 'USD',
+			minimumFractionDigits: 2,
+			maximumFractionDigits: 2,
+		}).format(Number(value ?? 0));
 	}
 
 	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {

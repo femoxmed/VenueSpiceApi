@@ -7,6 +7,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateOrganizationDto } from './dto/create-organization.dto';
 import { CreateOrganizationMemberDto } from './dto/create-organization-member.dto';
 import { UpdateOrganizationMemberDto } from './dto/update-organization-member.dto';
+import { UpdateOrganizationDealDto } from './dto/update-organization-deal.dto';
 import { OrganizationsService } from './organizations.service';
 
 @ApiTags('Organizations')
@@ -52,6 +53,17 @@ export class OrganizationsController {
 		@Req() req: { user: { id: string; email?: string; role?: Role } },
 	) {
 		return this.organizationsService.create(dto, req.user, req as any);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Patch(':id/deal')
+	updateDeal(
+		@Param('id') id: string,
+		@Body() dto: UpdateOrganizationDealDto,
+		@Req() req: { user: { id: string; email?: string; role?: Role } },
+	) {
+		return this.organizationsService.updateDeal(id, dto, req.user, req as any);
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)

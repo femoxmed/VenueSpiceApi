@@ -204,7 +204,7 @@ export class AgentsService {
 	private async sendInfluencerEventInvitation(agent: AgentEntity, event: EventEntity, code: string) {
 		const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:3000');
 		const loginUrl = this.joinUrl(frontendUrl, '/login');
-		const signupUrl = this.joinUrl(frontendUrl, '/signup');
+		const signupUrl = this.joinUrl(frontendUrl, '/signup?type=influencer');
 		const eventUrl = event.slug ? this.joinUrl(frontendUrl, `/events/${event.slug}`) : frontendUrl;
 		const organizationName = event.organization?.name || agent.organization?.name || 'Venue Spice organizer';
 		const location = event.isVirtual

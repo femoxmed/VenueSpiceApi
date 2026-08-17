@@ -11,6 +11,14 @@ import {
 } from 'class-validator';
 import { Type } from 'class-transformer';
 
+export class CheckoutTicketAttendeeDto {
+	@IsString()
+	name: string;
+
+	@IsEmail()
+	email: string;
+}
+
 export class CheckoutTicketItemDto {
 	@IsString()
 	ticketTypeId: string;
@@ -18,6 +26,12 @@ export class CheckoutTicketItemDto {
 	@IsInt()
 	@Min(1)
 	quantity: number;
+
+	@IsOptional()
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => CheckoutTicketAttendeeDto)
+	attendees?: CheckoutTicketAttendeeDto[];
 }
 
 export class CheckoutAddOnItemDto {

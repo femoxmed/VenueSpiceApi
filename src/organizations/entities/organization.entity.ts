@@ -129,6 +129,18 @@ export class OrganizationEntity {
 	@Column({ name: 'refund_policy', type: 'text', nullable: true })
 	refundPolicy?: string | null;
 
+	@Column({ name: 'deal_venue_spice_fee_percent', type: 'decimal', precision: 8, scale: 6, nullable: true })
+	dealVenueSpiceFeePercent?: number | null;
+
+	@Column({ name: 'deal_venue_spice_fee_fixed', type: 'decimal', precision: 10, scale: 2, nullable: true })
+	dealVenueSpiceFeeFixed?: number | null;
+
+	@Column({ name: 'deal_starts_at', type: 'timestamptz', nullable: true })
+	dealStartsAt?: Date | null;
+
+	@Column({ name: 'deal_ends_at', type: 'timestamptz', nullable: true })
+	dealEndsAt?: Date | null;
+
 	@OneToMany(() => EventEntity, (event) => event.organization)
 	events: EventEntity[];
 

@@ -515,7 +515,7 @@ export class DiscountsService {
 
 		const frontendUrl = this.configService.get<string>('FRONTEND_URL', 'http://localhost:3000');
 		const loginUrl = this.joinUrl(frontendUrl, '/login');
-		const signupUrl = this.joinUrl(frontendUrl, '/signup');
+		const signupUrl = this.joinUrl(frontendUrl, '/signup?type=influencer');
 		const campaignUrl = this.joinUrl(frontendUrl, '/influencer/coupons');
 		const eventUrl = event?.slug ? this.joinUrl(frontendUrl, `/events/${event.slug}`) : campaignUrl;
 		const organizationName = coupon.organization?.name || agent.organization?.name || 'Venue Spice organizer';
