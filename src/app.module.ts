@@ -39,6 +39,7 @@ import { BlogEntity } from './blogs/entities/blog.entity';
 import { OrganizationEntity } from './organizations/entities/organization.entity';
 import { OrganizationMemberEntity } from './organizations/entities/organization-member.entity';
 import { EventEntity } from './events/entities/event.entity';
+import { EventPrivateAccessTokenEntity } from './events/entities/event-private-access-token.entity';
 import { TicketTypeEntity } from './events/entities/ticket-type.entity';
 import { AgentEntity } from './agents/entities/agent.entity';
 import { ReferralCodeEntity } from './agents/entities/referral-code.entity';
@@ -141,6 +142,7 @@ function getBullQueuePrefix(value?: string | null) {
 					OrganizationEntity,
 					OrganizationMemberEntity,
 					EventEntity,
+					EventPrivateAccessTokenEntity,
 					TicketTypeEntity,
 					AgentEntity,
 					ReferralCodeEntity,

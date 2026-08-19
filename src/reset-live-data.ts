@@ -11,6 +11,7 @@ import { TicketAssignmentHistoryEntity } from './check-in/entities/ticket-assign
 import { CrmRecordEntity } from './crm/entities';
 import { seedBlogs } from './database/seeds/blog.seed';
 import { DiscountCouponEntity } from './discounts/entities/discount-coupon.entity';
+import { EventPrivateAccessTokenEntity } from './events/entities/event-private-access-token.entity';
 import { EventEntity } from './events/entities/event.entity';
 import { TicketTypeEntity } from './events/entities/ticket-type.entity';
 import { FinancialLedgerEntryEntity } from './financial-ledger/entities/financial-ledger-entry.entity';
@@ -67,6 +68,7 @@ const entities = [
 	OrganizationEntity,
 	OrganizationMemberEntity,
 	EventEntity,
+	EventPrivateAccessTokenEntity,
 	TicketTypeEntity,
 	AgentEntity,
 	ReferralCodeEntity,

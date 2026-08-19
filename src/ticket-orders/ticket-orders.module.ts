@@ -4,6 +4,7 @@ import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
 import { UserEntity } from '../auth/entities/user.entity';
 import { DiscountCouponEntity } from '../discounts/entities/discount-coupon.entity';
 import { EventEntity } from '../events/entities/event.entity';
+import { EventPrivateAccessTokenEntity } from '../events/entities/event-private-access-token.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
@@ -25,6 +26,7 @@ import { TicketOrdersService } from './ticket-orders.service';
 			TicketOrderItemEntity,
 			IssuedTicketEntity,
 			EventEntity,
+			EventPrivateAccessTokenEntity,
 			TicketTypeEntity,
 			ReferralCodeEntity,
 			DiscountCouponEntity,

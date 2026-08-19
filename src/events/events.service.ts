@@ -2,13 +2,16 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Request } from 'express';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Role } from '../common/enums/role.enum';
 import { AuditService } from '../audit/audit.service';
 import { CreateEventDto } from './dto/create-event.dto';
 import { EventEntity } from './entities/event.entity';
+import { EventPrivateAccessTokenEntity } from './entities/event-private-access-token.entity';
 import { TicketTypeEntity } from './entities/ticket-type.entity';
+import { VerifyPrivateEventAccessDto } from './dto/verify-private-event-access.dto';
 
 const MIN_PAID_PRICE = 1;
 
@@ -17,6 +20,8 @@ export class EventsService {
 	constructor(
 		@InjectRepository(EventEntity)
 		private readonly eventsRepository: Repository<EventEntity>,
+		@InjectRepository(EventPrivateAccessTokenEntity)
+		private readonly privateAccessTokensRepository: Repository<EventPrivateAccessTokenEntity>,
 		@InjectRepository(OrganizationEntity)
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
 		@InjectRepository(TicketTypeEntity)
@@ -31,7 +36,7 @@ export class EventsService {
 				return this.eventsRepository.find({
 					where: { organization: { ownerUserId: user.id } },
 					order: { startsAt: 'ASC', createdAt: 'DESC' },
-				});
+				}).then((events) => events.map((event) => this.toDashboardEvent(event)));
 			}
 			return this.findAllForOwner(organizationId, user.id);
 		}
@@ -39,7 +44,7 @@ export class EventsService {
 		return this.eventsRepository.find({
 			where: organizationId ? { organization: { id: organizationId } } : {},
 			order: { startsAt: 'ASC', createdAt: 'DESC' },
-		});
+		}).then((events) => events.map((event) => this.toDashboardEvent(event)));
 	}
 
 	private async findAllForOwner(organizationId: string, ownerUserId: string) {
@@ -47,7 +52,7 @@ export class EventsService {
 		return this.eventsRepository.find({
 			where: { organization: { id: organizationId } },
 			order: { startsAt: 'ASC', createdAt: 'DESC' },
-		});
+		}).then((events) => events.map((event) => this.toDashboardEvent(event)));
 	}
 
 	findPublic() {
@@ -67,10 +72,10 @@ export class EventsService {
 			.orderBy('event.startsAt', 'ASC')
 			.take(24)
 			.getMany()
-			.then((events) => events.map((event) => this.toPublicEvent(event)));
+			.then((events) => events.map((event) => this.toPublicListingEvent(event)));
 	}
 
-	async findPublicOne(idOrSlug: string) {
+	async findPublicOne(idOrSlug: string, accessToken?: string) {
 		const where = this.isUuid(idOrSlug)
 			? [
 					{ id: idOrSlug, status: 'published' as const },
@@ -81,7 +86,35 @@ export class EventsService {
 			where,
 		});
 		if (!event) throw new NotFoundException('Published event not found');
+		const access = await this.getPrivateEventAccessState(event, accessToken);
+		if (!access.allowed) return this.toPrivateAccessGate(access.reason);
 		return this.toPublicEvent(event);
+	}
+
+	async verifyPrivateAccess(slug: string, dto: VerifyPrivateEventAccessDto) {
+		const event = await this.eventsRepository.findOne({
+			where: this.isUuid(slug)
+				? [{ id: slug, status: 'published' as const }, { slug, status: 'published' as const }]
+				: [{ slug, status: 'published' as const }],
+		});
+		if (!event) throw new NotFoundException('Published event not found');
+		if ((event.visibility || 'public') !== 'private') {
+			return { event: this.toPublicEvent(event), privateAccessToken: null };
+		}
+
+		const tokenAccess = await this.getPrivateEventAccessState(event, dto.privateAccessToken);
+		if (tokenAccess.allowed && dto.privateAccessToken) {
+			return { event: this.toPublicEvent(event), privateAccessToken: dto.privateAccessToken.trim() };
+		}
+
+		const accessCode = dto.accessCode?.trim();
+		if (!accessCode || !this.safeCompareHash(accessCode, event.accessCodeHash)) {
+			return this.toPrivateAccessGate('invalid_code');
+		}
+
+		const privateAccessToken = this.generatePrivateAccessToken();
+		await this.createPrivateAccessTokenRecord(event, privateAccessToken, null);
+		return { event: this.toPublicEvent(event), privateAccessToken };
 	}
 
 	async findPublicOrganizerProfile(username: string) {
@@ -109,7 +142,7 @@ export class EventsService {
 			.addOrderBy('event.createdAt', 'DESC')
 			.getMany();
 
-		const publicEvents = events.map((event) => this.toPublicEvent(event));
+		const publicEvents = events.map((event) => this.toPublicListingEvent(event));
 		const upcomingEvents = publicEvents.filter((event) => {
 			const endTime = event.endsAt ? new Date(event.endsAt).getTime() : new Date(event.startsAt).getTime();
 			return endTime >= now.getTime();
@@ -146,6 +179,11 @@ export class EventsService {
 	}
 
 	async findOne(idOrSlug: string, user?: { id: string; role: Role }) {
+		const event = await this.findOneEntity(idOrSlug, user);
+		return this.toDashboardEvent(event);
+	}
+
+	private async findOneEntity(idOrSlug: string, user?: { id: string; role: Role }) {
 		const event = await this.eventsRepository.findOne({
 			where: [{ id: idOrSlug }, { slug: idOrSlug }],
 		});
@@ -182,12 +220,19 @@ export class EventsService {
 			isCreate: true,
 		});
 
+		const privateAccessToken = dto.visibility === 'private' ? this.generatePrivateAccessToken() : null;
+		const accessCode = this.normalizeSecret(dto.accessCode);
 		const event = this.eventsRepository.create({
 			...dto,
 			slug,
 			startsAt,
 			endsAt,
 			organization,
+			visibility: dto.visibility || 'public',
+			privateAccessToken: null,
+			privateAccessTokenHash: privateAccessToken ? this.hashSecret(privateAccessToken) : null,
+			accessCodeHash: accessCode ? this.hashSecret(accessCode) : null,
+			accessCodeUpdatedAt: accessCode ? new Date() : null,
 			refundsAllowed: dto.refundsAllowed ?? true,
 			refundCutoffHours: this.normalizeRefundCutoffHours(dto.refundCutoffHours),
 			refundablePercentage: this.normalizeRefundablePercentage(dto.refundablePercentage),
@@ -197,7 +242,12 @@ export class EventsService {
 			appearances: dto.appearances || [],
 			addOns: dto.addOns || [],
 		});
-		return this.eventsRepository.save(event);
+		const saved = await this.eventsRepository.save(event);
+		if (privateAccessToken) {
+			await this.createPrivateAccessTokenRecord(saved, privateAccessToken, user?.id ?? null);
+			return this.withPrivateAccessToken(saved, privateAccessToken);
+		}
+		return this.toDashboardEvent(saved);
 	}
 
 	async update(
@@ -207,14 +257,14 @@ export class EventsService {
 		request?: Request,
 	) {
 		this.validatePricing(dto);
-		const event = await this.findOne(id, user);
+		const event = await this.findOneEntity(id, user);
 		const before = this.pickEventAuditFields(event);
 		if (dto.slug && dto.slug !== event.slug) {
 			const existing = await this.eventsRepository.findOne({ where: { slug: dto.slug } });
 			if (existing) throw new BadRequestException('Event slug already exists');
 		}
 
-		const { ticketTypes, ...eventPatch } = dto;
+		const { ticketTypes, accessCode: _accessCode, ...eventPatch } = dto;
 		const nextStartsAt = dto.startsAt ? new Date(dto.startsAt) : event.startsAt;
 		const nextEndsAt = dto.endsAt ? new Date(dto.endsAt) : event.endsAt || nextStartsAt;
 		this.validateTicketSalesWindowsForEvent(dto.ticketTypes || [], nextEndsAt);
@@ -247,10 +297,23 @@ export class EventsService {
 			event.organization,
 		);
 
+		let generatedPrivateAccessToken: string | null = null;
+		const nextVisibility = dto.visibility ?? event.visibility;
+		if (nextVisibility === 'private' && (event.visibility !== 'private' || !event.privateAccessTokenHash)) {
+			generatedPrivateAccessToken = this.generatePrivateAccessToken();
+		}
+
 		Object.assign(event, {
 			...eventPatch,
 			startsAt: nextStartsAt,
 			endsAt: nextEndsAt,
+			visibility: nextVisibility,
+			privateAccessToken: null,
+			privateAccessTokenHash: nextVisibility === 'public'
+				? null
+				: generatedPrivateAccessToken
+					? this.hashSecret(generatedPrivateAccessToken)
+					: event.privateAccessTokenHash || (event.privateAccessToken ? this.hashSecret(event.privateAccessToken) : null),
 			refundsAllowed: dto.refundsAllowed ?? event.refundsAllowed,
 			refundCutoffHours: dto.refundCutoffHours !== undefined ? this.normalizeRefundCutoffHours(dto.refundCutoffHours) : event.refundCutoffHours,
 			refundablePercentage: dto.refundablePercentage !== undefined ? this.normalizeRefundablePercentage(dto.refundablePercentage) : event.refundablePercentage,
@@ -260,11 +323,28 @@ export class EventsService {
 			addOns: dto.addOns ?? event.addOns,
 		});
 
+		if (dto.accessCode !== undefined) {
+			const normalizedAccessCode = this.normalizeSecret(dto.accessCode);
+			event.accessCodeHash = normalizedAccessCode ? this.hashSecret(normalizedAccessCode) : null;
+			event.accessCodeUpdatedAt = normalizedAccessCode ? new Date() : null;
+		}
+		if (nextVisibility === 'public') {
+			event.accessCodeHash = null;
+			event.accessCodeUpdatedAt = null;
+		}
+
 		if (ticketTypes) {
 			event.ticketTypes = await this.reconcileTicketTypes(event, ticketTypes);
 		}
 
 		const saved = await this.eventsRepository.save(event);
+		if (generatedPrivateAccessToken) {
+			await this.revokePrivateAccessTokens(saved.id, user?.id ?? null);
+			await this.createPrivateAccessTokenRecord(saved, generatedPrivateAccessToken, user?.id ?? null);
+		}
+		if (nextVisibility === 'public' && event.visibility === 'public') {
+			await this.revokePrivateAccessTokens(saved.id, user?.id ?? null);
+		}
 		await this.auditService.log(
 			'event.updated',
 			user,
@@ -278,11 +358,42 @@ export class EventsService {
 			},
 			request,
 		);
-		return saved;
+		return generatedPrivateAccessToken ? this.withPrivateAccessToken(saved, generatedPrivateAccessToken) : this.toDashboardEvent(saved);
 	}
 
 	updateStatus(id: string, status: EventEntity['status'], user?: { id: string; role: Role }, request?: Request) {
 		return this.update(id, { status }, user, request);
+	}
+
+	async regeneratePrivateLink(id: string, user?: { id: string; role: Role }, request?: Request) {
+		const event = await this.findOneEntity(id, user);
+		if ((event.visibility || 'public') !== 'private') {
+			throw new BadRequestException('Only private events can have private links.');
+		}
+		const privateAccessToken = this.generatePrivateAccessToken();
+		event.privateAccessToken = null;
+		event.privateAccessTokenHash = this.hashSecret(privateAccessToken);
+		const saved = await this.eventsRepository.save(event);
+		await this.revokePrivateAccessTokens(saved.id, user?.id ?? null);
+		await this.createPrivateAccessTokenRecord(saved, privateAccessToken, user?.id ?? null);
+		await this.auditService.log(
+			'event.private_link.regenerated',
+			user,
+			'event',
+			saved.id,
+			{ privateAccessToken: { before: 'revoked', after: 'regenerated' } },
+			{
+				organizationId: saved.organization?.id,
+				organizationName: saved.organization?.name,
+				eventTitle: saved.title,
+			},
+			request,
+		);
+		return {
+			event: this.withPrivateAccessToken(saved, privateAccessToken),
+			privateAccessToken,
+			urlPath: `/events/${saved.slug}?access=${encodeURIComponent(privateAccessToken)}`,
+		};
 	}
 
 	private async reconcileTicketTypes(
@@ -385,6 +496,7 @@ export class EventsService {
 			appearances: this.stableJson(event.appearances || []),
 			addOns: this.stableJson(event.addOns || []),
 			status: event.status,
+			visibility: event.visibility,
 			refundsAllowed: event.refundsAllowed,
 			refundCutoffHours: event.refundCutoffHours,
 			refundablePercentage: event.refundablePercentage,
@@ -503,6 +615,32 @@ export class EventsService {
 		}
 	}
 
+	private async getPrivateEventAccessState(event: EventEntity, accessToken?: string): Promise<{ allowed: boolean; reason?: 'missing_token' | 'invalid_token' | 'revoked_token' }> {
+		if ((event.visibility || 'public') !== 'private') return { allowed: true };
+		const normalizedToken = accessToken?.trim();
+		if (!normalizedToken) return { allowed: false, reason: 'missing_token' };
+		const tokenHash = this.hashSecret(normalizedToken);
+		const tokenRecord = await this.privateAccessTokensRepository.findOne({
+			where: { event: { id: event.id }, tokenHash },
+		});
+		if (tokenRecord?.status === 'revoked') return { allowed: false, reason: 'revoked_token' };
+		if (tokenRecord?.status === 'active') {
+			tokenRecord.lastUsedAt = new Date();
+			tokenRecord.useCount = Number(tokenRecord.useCount || 0) + 1;
+			await this.privateAccessTokensRepository.save(tokenRecord);
+			return { allowed: true };
+		}
+		if (event.privateAccessToken && normalizedToken === event.privateAccessToken) {
+			await this.createPrivateAccessTokenRecord(event, normalizedToken, null);
+			event.privateAccessToken = null;
+			event.privateAccessTokenHash = tokenHash;
+			await this.eventsRepository.save(event);
+			return { allowed: true };
+		}
+		if (this.safeCompareHash(normalizedToken, event.privateAccessTokenHash)) return { allowed: true };
+		return { allowed: false, reason: 'invalid_token' };
+	}
+
 	private validateDraftTransition({
 		currentStatus,
 		nextStatus,
@@ -552,8 +690,15 @@ export class EventsService {
 
 	private toPublicEvent(event: EventEntity) {
 		const organization = event.organization;
+		const {
+			privateAccessToken: _privateAccessToken,
+			privateAccessTokenHash: _privateAccessTokenHash,
+			accessCodeHash: _accessCodeHash,
+			privateAccessTokens: _privateAccessTokens,
+			...publicEvent
+		} = event;
 		return {
-			...event,
+			...publicEvent,
 			organization: organization ? {
 				id: organization.id,
 				name: organization.name,
@@ -569,12 +714,98 @@ export class EventsService {
 		};
 	}
 
+	private toPublicListingEvent(event: EventEntity) {
+		const publicEvent = this.toPublicEvent(event);
+		if ((event.visibility || 'public') !== 'private') return publicEvent;
+
+		return {
+			...publicEvent,
+			ticketTypes: [],
+			addOns: [],
+			organizerPayoutReady: undefined,
+		};
+	}
+
+	private toDashboardEvent(event: EventEntity) {
+		const {
+			privateAccessToken: _privateAccessToken,
+			privateAccessTokenHash: _privateAccessTokenHash,
+			accessCodeHash: _accessCodeHash,
+			privateAccessTokens: _privateAccessTokens,
+			...dashboardEvent
+		} = event;
+		return {
+			...dashboardEvent,
+			privateAccessToken: null,
+			hasAccessCode: Boolean(event.accessCodeHash),
+		};
+	}
+
 	private slugify(value: string) {
 		return value
 			.toLowerCase()
 			.trim()
 			.replace(/[^a-z0-9]+/g, '-')
 			.replace(/(^-|-$)+/g, '');
+	}
+
+	private generatePrivateAccessToken() {
+		return randomBytes(24).toString('base64url');
+	}
+
+	private hashSecret(value: string) {
+		return createHash('sha256').update(value.trim()).digest('hex');
+	}
+
+	private safeCompareHash(value: string, hash?: string | null) {
+		if (!hash) return false;
+		const incoming = Buffer.from(this.hashSecret(value));
+		const stored = Buffer.from(hash);
+		return incoming.length === stored.length && timingSafeEqual(incoming, stored);
+	}
+
+	private normalizeSecret(value?: string | null) {
+		const normalized = value?.trim();
+		return normalized || null;
+	}
+
+	private async createPrivateAccessTokenRecord(event: EventEntity, privateAccessToken: string, createdByUserId?: string | null) {
+		return this.privateAccessTokensRepository.save(this.privateAccessTokensRepository.create({
+			event,
+			tokenHash: this.hashSecret(privateAccessToken),
+			status: 'active',
+			createdByUserId: createdByUserId || null,
+			useCount: 0,
+		}));
+	}
+
+	private async revokePrivateAccessTokens(eventId: string, revokedByUserId?: string | null) {
+		const activeTokens = await this.privateAccessTokensRepository.find({
+			where: { event: { id: eventId }, status: 'active' },
+		});
+		if (!activeTokens.length) return;
+		const now = new Date();
+		await this.privateAccessTokensRepository.save(activeTokens.map((token) => ({
+			...token,
+			status: 'revoked' as const,
+			revokedAt: now,
+			revokedByUserId: revokedByUserId || null,
+		})));
+	}
+
+	private withPrivateAccessToken(event: EventEntity, privateAccessToken: string) {
+		return {
+			...this.toDashboardEvent(event),
+			privateAccessToken,
+		};
+	}
+
+	private toPrivateAccessGate(reason?: 'missing_token' | 'invalid_token' | 'revoked_token' | 'invalid_code') {
+		return {
+			requiresAccess: true,
+			visibility: 'private' as const,
+			reason: reason || 'missing_token',
+		};
 	}
 
 	private isUuid(value: string) {

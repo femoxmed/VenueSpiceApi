@@ -5,13 +5,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { In, Repository } from 'typeorm';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
 import { UserEntity } from '../auth/entities/user.entity';
 import { DiscountCouponEntity } from '../discounts/entities/discount-coupon.entity';
 import { EventEntity } from '../events/entities/event.entity';
+import { EventPrivateAccessTokenEntity } from '../events/entities/event-private-access-token.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
@@ -111,6 +112,8 @@ export class TicketOrdersService {
 		private readonly issuedTicketsRepository: Repository<IssuedTicketEntity>,
 		@InjectRepository(EventEntity)
 		private readonly eventsRepository: Repository<EventEntity>,
+		@InjectRepository(EventPrivateAccessTokenEntity)
+		private readonly privateAccessTokensRepository: Repository<EventPrivateAccessTokenEntity>,
 		@InjectRepository(TicketTypeEntity)
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
 		@InjectRepository(ReferralCodeEntity)
@@ -270,7 +273,7 @@ export class TicketOrdersService {
 			};
 		}
 
-		const session = await this.createStripeSession(order);
+		const session = await this.createStripeSession(order, dto.privateAccessToken);
 		order.stripeCheckoutSessionId = session.id;
 		order.stripePaymentIntentId = session.payment_intent ?? null;
 		order.checkoutUrl = session.url ?? null;
@@ -301,6 +304,8 @@ export class TicketOrdersService {
 	private async prepareCheckout(dto: {
 		eventId: string;
 		referralCode?: string;
+		privateAccessToken?: string;
+		accessCode?: string;
 		items?: CheckoutTicketItemDto[];
 		addOns?: CheckoutAddOnItemDto[];
 	}) {
@@ -309,6 +314,12 @@ export class TicketOrdersService {
 		});
 		if (!event || event.status !== 'published') {
 			throw new BadRequestException('Published event not found');
+		}
+		if ((event.visibility || 'public') === 'private') {
+			const canAccess = await this.canAccessPrivateEvent(event, dto.privateAccessToken, dto.accessCode);
+			if (!canAccess) {
+				throw new BadRequestException('This private event link is invalid or has expired.');
+			}
 		}
 		const requestedTickets = dto.items ?? [];
 		const requestedAddOns = dto.addOns ?? [];
@@ -526,7 +537,7 @@ export class TicketOrdersService {
 		return { received: true };
 	}
 
-	private async createStripeSession(order: TicketOrderEntity): Promise<StripeCheckoutSession> {
+	private async createStripeSession(order: TicketOrderEntity, privateAccessToken?: string): Promise<StripeCheckoutSession> {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
 		const appUrl = this.configService.get<string>('WEB_APP_URL', 'http://localhost:3000');
 		if (!secretKey) {
@@ -541,8 +552,11 @@ export class TicketOrdersService {
 		const params = new URLSearchParams();
 		const settings = await this.platformSettingsService.getPricingSettings();
 		params.set('mode', 'payment');
+		const privateAccessQuery = order.event.visibility === 'private' && privateAccessToken?.trim()
+			? `&access=${encodeURIComponent(privateAccessToken.trim())}`
+			: '';
 		params.set('success_url', `${appUrl}/events/${order.event.slug}/payment/success?order=${order.id}&session_id={CHECKOUT_SESSION_ID}`);
-		params.set('cancel_url', `${appUrl}/events/${order.event.slug}/purchase?checkout=cancelled`);
+		params.set('cancel_url', `${appUrl}/events/${order.event.slug}/purchase?checkout=cancelled${privateAccessQuery}`);
 		params.set('customer_email', order.customerEmail);
 		params.set('billing_address_collection', 'required');
 		params.set('automatic_tax[enabled]', settings.stripeAutomaticTaxEnabled ? 'true' : 'false');
@@ -1398,6 +1412,39 @@ export class TicketOrdersService {
 
 	private buildTicketCode() {
 		return `EVB-${randomBytes(6).toString('hex').toUpperCase()}`;
+	}
+
+	private async canAccessPrivateEvent(event: EventEntity, privateAccessToken?: string, accessCode?: string) {
+		const normalizedToken = privateAccessToken?.trim();
+		if (normalizedToken) {
+			const tokenHash = this.hashSecret(normalizedToken);
+			const tokenRecord = await this.privateAccessTokensRepository.findOne({
+				where: { event: { id: event.id }, tokenHash, status: 'active' },
+			});
+			if (tokenRecord) {
+				tokenRecord.lastUsedAt = new Date();
+				tokenRecord.useCount = Number(tokenRecord.useCount || 0) + 1;
+				await this.privateAccessTokensRepository.save(tokenRecord);
+				return true;
+			}
+			if (event.privateAccessToken && normalizedToken === event.privateAccessToken) return true;
+			if (this.safeCompareHash(normalizedToken, event.privateAccessTokenHash)) return true;
+		}
+
+		const normalizedCode = accessCode?.trim();
+		if (normalizedCode && this.safeCompareHash(normalizedCode, event.accessCodeHash)) return true;
+		return false;
+	}
+
+	private hashSecret(value: string) {
+		return createHash('sha256').update(value.trim()).digest('hex');
+	}
+
+	private safeCompareHash(value: string, hash?: string | null) {
+		if (!hash) return false;
+		const incoming = Buffer.from(this.hashSecret(value));
+		const stored = Buffer.from(hash);
+		return incoming.length === stored.length && timingSafeEqual(incoming, stored);
 	}
 
 	private buildInvoiceNumber() {

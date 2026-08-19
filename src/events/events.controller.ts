@@ -5,6 +5,7 @@ import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateEventDto } from './dto/create-event.dto';
+import { VerifyPrivateEventAccessDto } from './dto/verify-private-event-access.dto';
 import { EventsService } from './events.service';
 
 @ApiTags('Events')
@@ -34,8 +35,13 @@ export class EventsController {
 	}
 
 	@Get('public/:slug')
-	findPublicOne(@Param('slug') slug: string) {
-		return this.eventsService.findPublicOne(slug);
+	findPublicOne(@Param('slug') slug: string, @Query('access') access?: string) {
+		return this.eventsService.findPublicOne(slug, access);
+	}
+
+	@Post('public/:slug/access')
+	verifyPrivateAccess(@Param('slug') slug: string, @Body() dto: VerifyPrivateEventAccessDto) {
+		return this.eventsService.verifyPrivateAccess(slug, dto);
 	}
 
 	@ApiBearerAuth()
@@ -76,5 +82,16 @@ export class EventsController {
 		@Req() req: { user: { id: string; role: Role } },
 	) {
 		return this.eventsService.updateStatus(id, status, req.user, req as any);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
+	@Post(':id/private-link/regenerate')
+	regeneratePrivateLink(
+		@Param('id') id: string,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.eventsService.regeneratePrivateLink(id, req.user, req as any);
 	}
 }

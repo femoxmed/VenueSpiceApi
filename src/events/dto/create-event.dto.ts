@@ -149,6 +149,14 @@ export class CreateEventDto {
 	status?: 'draft' | 'published' | 'cancelled' | 'archived';
 
 	@IsOptional()
+	@IsIn(['public', 'private'])
+	visibility?: 'public' | 'private';
+
+	@IsOptional()
+	@IsString()
+	accessCode?: string;
+
+	@IsOptional()
 	@IsInt()
 	@Min(0)
 	refundCutoffHours?: number;

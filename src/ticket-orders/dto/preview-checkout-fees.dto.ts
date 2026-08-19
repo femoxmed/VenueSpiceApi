@@ -16,6 +16,14 @@ export class PreviewCheckoutFeesDto {
 	referralCode?: string;
 
 	@IsOptional()
+	@IsString()
+	privateAccessToken?: string;
+
+	@IsOptional()
+	@IsString()
+	accessCode?: string;
+
+	@IsOptional()
 	@IsArray()
 	@ValidateNested({ each: true })
 	@Type(() => CheckoutTicketItemDto)

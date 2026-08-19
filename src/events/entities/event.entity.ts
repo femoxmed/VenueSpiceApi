@@ -8,6 +8,7 @@ import {
 	UpdateDateColumn,
 } from 'typeorm';
 import { OrganizationEntity } from '../../organizations/entities/organization.entity';
+import { EventPrivateAccessTokenEntity } from './event-private-access-token.entity';
 import { TicketTypeEntity } from './ticket-type.entity';
 
 @Entity('events')
@@ -81,6 +82,21 @@ export class EventEntity {
 	@Column({ type: 'varchar', default: 'draft' })
 	status: 'draft' | 'published' | 'cancelled' | 'archived';
 
+	@Column({ type: 'varchar', default: 'public' })
+	visibility: 'public' | 'private';
+
+	@Column({ name: 'private_access_token', type: 'varchar', nullable: true })
+	privateAccessToken?: string | null;
+
+	@Column({ name: 'private_access_token_hash', type: 'varchar', nullable: true })
+	privateAccessTokenHash?: string | null;
+
+	@Column({ name: 'access_code_hash', type: 'varchar', nullable: true })
+	accessCodeHash?: string | null;
+
+	@Column({ name: 'access_code_updated_at', type: 'timestamptz', nullable: true })
+	accessCodeUpdatedAt?: Date | null;
+
 	@Column({ name: 'refund_cutoff_hours', type: 'int', default: 24 })
 	refundCutoffHours: number;
 
@@ -95,6 +111,11 @@ export class EventEntity {
 		eager: true,
 	})
 	ticketTypes: TicketTypeEntity[];
+
+	@OneToMany(() => EventPrivateAccessTokenEntity, (token) => token.event, {
+		cascade: true,
+	})
+	privateAccessTokens: EventPrivateAccessTokenEntity[];
 
 	@CreateDateColumn({ name: 'created_at' })
 	createdAt: Date;

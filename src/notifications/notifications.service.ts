@@ -256,13 +256,13 @@ export class NotificationsService implements OnApplicationBootstrap {
 		const preheader = options.preheader || options.intro || options.title;
 		const rows = options.rows?.length
 			? `
-				<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:26px 0;border-collapse:collapse;border:1px solid #E7ECFF;background:#F8FAFF;border-radius:12px;overflow:hidden;">
+				<table class="vs-data-table" role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:22px 0;border-collapse:collapse;border:1px solid #E7ECFF;background:#F8FAFF;border-radius:12px;overflow:hidden;">
 					${options.rows
 						.map(
 							(row) => `
 								<tr>
-									<td style="padding:14px 18px;border-bottom:1px solid #E7ECFF;color:#68708A;font:700 12px Arial,sans-serif;text-transform:uppercase;letter-spacing:1.3px;width:38%;">${this.escapeHtml(row.label)}</td>
-									<td style="padding:14px 18px;border-bottom:1px solid #E7ECFF;color:#171B24;font:700 15px Arial,sans-serif;">${this.escapeHtml(this.formatEmailValue(row.value))}</td>
+									<td class="vs-data-label" style="padding:13px 16px;border-bottom:1px solid #E7ECFF;color:#68708A;font:700 11px Arial,sans-serif;text-transform:uppercase;letter-spacing:1px;width:38%;vertical-align:top;">${this.escapeHtml(row.label)}</td>
+									<td class="vs-data-value" style="padding:13px 16px;border-bottom:1px solid #E7ECFF;color:#171B24;font:700 14px/1.5 Arial,sans-serif;word-break:break-word;vertical-align:top;">${this.escapeHtml(this.formatEmailValue(row.value))}</td>
 								</tr>
 							`,
 						)
@@ -280,7 +280,7 @@ export class NotificationsService implements OnApplicationBootstrap {
 			: '';
 		const body = options.body ? this.sanitizeEmailHtml(options.body) : '';
 		const note = options.note
-			? `<div style="margin-top:24px;padding:16px 18px;border-left:4px solid #2960EC;background:#F3F6FF;color:#333942;font:400 14px/1.7 Arial,sans-serif;border-radius:0 12px 12px 0;">${this.sanitizeEmailHtml(options.note)}</div>`
+			? `<div class="vs-note" style="margin-top:22px;padding:15px 16px;border-left:4px solid #2960EC;background:#F3F6FF;color:#333942;font:400 14px/1.7 Arial,sans-serif;border-radius:0 12px 12px 0;">${this.sanitizeEmailHtml(options.note)}</div>`
 			: '';
 
 		return `
@@ -291,50 +291,75 @@ export class NotificationsService implements OnApplicationBootstrap {
 		<meta name="viewport" content="width=device-width, initial-scale=1">
 		<meta name="color-scheme" content="light">
 		<title>${this.escapeHtml(options.title)}</title>
+		<style>
+			@media only screen and (max-width: 600px) {
+				.vs-outer { padding: 18px 10px !important; }
+				.vs-container { max-width: 100% !important; }
+				.vs-header-tagline { display: none !important; }
+				.vs-card { border-radius: 16px !important; }
+				.vs-card-body { padding: 24px 18px 22px !important; }
+				.vs-logo-mark { width: 38px !important; height: 38px !important; border-radius: 12px !important; font-size: 16px !important; }
+				.vs-brand-name { font-size: 20px !important; }
+				.vs-brand-subtitle { font-size: 9px !important; letter-spacing: 1.6px !important; }
+				.vs-eyebrow { margin-bottom: 10px !important; font-size: 10px !important; letter-spacing: 1.4px !important; }
+				.vs-title { font-size: 24px !important; line-height: 1.22 !important; }
+				.vs-greeting { margin-top: 18px !important; font-size: 15px !important; line-height: 1.6 !important; }
+				.vs-copy { font-size: 14px !important; line-height: 1.7 !important; }
+				.vs-data-table { margin: 18px 0 !important; }
+				.vs-data-label,
+				.vs-data-value { display: block !important; width: auto !important; padding: 11px 14px !important; }
+				.vs-data-label { padding-bottom: 3px !important; border-bottom: 0 !important; }
+				.vs-data-value { padding-top: 0 !important; }
+				.vs-actions { margin-top: 20px !important; }
+				.vs-button { display: block !important; width: auto !important; margin: 10px 0 0 !important; padding: 13px 16px !important; text-align: center !important; }
+				.vs-note { margin-top: 18px !important; padding: 14px !important; font-size: 13px !important; line-height: 1.65 !important; }
+				.vs-footer { padding: 18px 2px 0 !important; font-size: 11px !important; line-height: 1.65 !important; }
+			}
+		</style>
 	</head>
 	<body style="margin:0;padding:0;background:#EEF4FF;color:#171B24;">
 		<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">${this.escapeHtml(preheader)}</div>
 		<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F5F7FB;border-collapse:collapse;">
 			<tr>
-				<td align="center" style="padding:34px 16px;">
-					<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:680px;border-collapse:collapse;">
+				<td class="vs-outer" align="center" style="padding:30px 14px;">
+					<table class="vs-container" role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;border-collapse:collapse;">
 						<tr>
-							<td style="padding:0 0 20px 0;">
+							<td style="padding:0 0 16px 0;">
 								<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
 									<tr>
 										<td>
 											<table role="presentation" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
 												<tr>
-													<td style="width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#E5A21A 0%,#EA177C 52%,#3F22D8 100%);color:#FFFFFF;font:900 18px Arial Black,Arial,sans-serif;text-align:center;vertical-align:middle;">VS</td>
+													<td class="vs-logo-mark" style="width:42px;height:42px;border-radius:14px;background:linear-gradient(135deg,#E5A21A 0%,#EA177C 52%,#3F22D8 100%);color:#FFFFFF;font:900 17px Arial Black,Arial,sans-serif;text-align:center;vertical-align:middle;">VS</td>
 													<td style="padding-left:12px;">
-														<div style="font:900 24px Arial Black,Arial,sans-serif;letter-spacing:0;color:#171B24;line-height:1;">Venue Spice</div>
-														<div style="margin-top:6px;font:700 10px Arial,sans-serif;letter-spacing:2.5px;color:#3F45FF;text-transform:uppercase;">Tickets. Vendors. Events.</div>
+														<div class="vs-brand-name" style="font:900 23px Arial Black,Arial,sans-serif;letter-spacing:0;color:#171B24;line-height:1;">Venue Spice</div>
+														<div class="vs-brand-subtitle" style="margin-top:5px;font:700 10px Arial,sans-serif;letter-spacing:2.1px;color:#3F45FF;text-transform:uppercase;">Tickets. Vendors. Events.</div>
 													</td>
 												</tr>
 											</table>
 										</td>
-										<td align="right" style="font:700 11px Arial,sans-serif;letter-spacing:1.8px;color:#EA177C;text-transform:uppercase;">Your event starts here</td>
+										<td class="vs-header-tagline" align="right" style="font:700 11px Arial,sans-serif;letter-spacing:1.5px;color:#EA177C;text-transform:uppercase;">Your event starts here</td>
 									</tr>
 								</table>
 							</td>
 						</tr>
 						<tr>
-							<td style="border:1px solid #E1E6F5;background:#FFFFFF;border-radius:22px;overflow:hidden;box-shadow:0 18px 50px rgba(24,31,56,0.10);">
+							<td class="vs-card" style="border:1px solid #E1E6F5;background:#FFFFFF;border-radius:20px;overflow:hidden;box-shadow:0 18px 50px rgba(24,31,56,0.10);">
 								<div style="height:7px;background:linear-gradient(90deg,#E5A21A 0%,#EA177C 50%,#3F45FF 100%);line-height:7px;font-size:7px;">&nbsp;</div>
-								<div style="padding:38px 34px 34px;">
-									${options.eyebrow ? `<div style="margin-bottom:14px;font:800 11px Arial,sans-serif;letter-spacing:2.1px;color:#2960EC;text-transform:uppercase;">${this.escapeHtml(options.eyebrow)}</div>` : ''}
-									<h1 style="margin:0;color:#171B24;font:900 31px/1.15 Arial Black,Arial,sans-serif;letter-spacing:0;">${this.escapeHtml(options.title)}</h1>
-									${options.greeting ? `<p style="margin:24px 0 0;color:#171B24;font:700 16px/1.7 Arial,sans-serif;">${this.escapeHtml(options.greeting)}</p>` : ''}
-									${options.intro ? `<p style="margin:12px 0 0;color:#4A5268;font:400 15px/1.8 Arial,sans-serif;">${this.escapeHtml(options.intro)}</p>` : ''}
-									${body ? `<div style="margin-top:18px;color:#4A5268;font:400 15px/1.8 Arial,sans-serif;">${body}</div>` : ''}
+								<div class="vs-card-body" style="padding:32px 30px 30px;">
+									${options.eyebrow ? `<div class="vs-eyebrow" style="margin-bottom:12px;font:800 11px Arial,sans-serif;letter-spacing:1.8px;color:#2960EC;text-transform:uppercase;">${this.escapeHtml(options.eyebrow)}</div>` : ''}
+									<h1 class="vs-title" style="margin:0;color:#171B24;font:900 28px/1.18 Arial Black,Arial,sans-serif;letter-spacing:0;">${this.escapeHtml(options.title)}</h1>
+									${options.greeting ? `<p class="vs-greeting" style="margin:22px 0 0;color:#171B24;font:700 16px/1.65 Arial,sans-serif;">${this.escapeHtml(options.greeting)}</p>` : ''}
+									${options.intro ? `<p class="vs-copy" style="margin:10px 0 0;color:#4A5268;font:400 15px/1.75 Arial,sans-serif;">${this.escapeHtml(options.intro)}</p>` : ''}
+									${body ? `<div class="vs-copy" style="margin-top:16px;color:#4A5268;font:400 15px/1.75 Arial,sans-serif;">${body}</div>` : ''}
 									${rows}
-									${actionHtml || secondaryActionHtml ? `<div style="margin-top:26px;">${actionHtml}${secondaryActionHtml}</div>` : ''}
+									${actionHtml || secondaryActionHtml ? `<div class="vs-actions" style="margin-top:24px;">${actionHtml}${secondaryActionHtml}</div>` : ''}
 									${note}
 								</div>
 							</td>
 						</tr>
 						<tr>
-							<td style="padding:22px 4px 0;color:#68708A;font:400 12px/1.7 Arial,sans-serif;">
+							<td class="vs-footer" style="padding:20px 4px 0;color:#68708A;font:400 12px/1.7 Arial,sans-serif;">
 								${options.footerHtml ? this.sanitizeEmailHtml(options.footerHtml) : this.escapeHtml(options.footerNote || 'This email was sent by Venue Spice.')}
 								<br>
 								Need help? Email <a href="mailto:${this.escapeHtml(supportEmail)}" style="color:#2960EC;text-decoration:underline;">${this.escapeHtml(supportEmail)}</a>${dashboardUrl ? ` or visit your <a href="${this.escapeHtml(dashboardUrl)}" style="color:#2960EC;text-decoration:underline;">Venue Spice dashboard</a>` : ''}.
@@ -554,10 +579,10 @@ export class NotificationsService implements OnApplicationBootstrap {
 
 	private buildActionButton(action: EmailAction, secondary: boolean) {
 		const styles = secondary
-			? 'display:inline-block;margin:8px 10px 0 0;padding:13px 18px;border:1px solid #C8D6FF;border-radius:999px;color:#2960EC;background:#FFFFFF;text-decoration:none;font:800 12px Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;'
-			: 'display:inline-block;margin:8px 10px 0 0;padding:14px 22px;border:1px solid #2960EC;border-radius:999px;color:#FFFFFF;background:#2960EC;text-decoration:none;font:900 12px Arial,sans-serif;letter-spacing:1.2px;text-transform:uppercase;';
+			? 'display:inline-block;margin:8px 10px 0 0;padding:13px 18px;border:1px solid #C8D6FF;border-radius:999px;color:#2960EC;background:#FFFFFF;text-decoration:none;font:800 12px Arial,sans-serif;letter-spacing:1px;text-transform:uppercase;'
+			: 'display:inline-block;margin:8px 10px 0 0;padding:14px 20px;border:1px solid #2960EC;border-radius:999px;color:#FFFFFF;background:#2960EC;text-decoration:none;font:900 12px Arial,sans-serif;letter-spacing:1px;text-transform:uppercase;';
 
-		return `<a href="${this.escapeHtml(action.url)}" style="${styles}">${this.escapeHtml(action.label)}</a>`;
+		return `<a class="vs-button" href="${this.escapeHtml(action.url)}" style="${styles}">${this.escapeHtml(action.label)}</a>`;
 	}
 
 	private getPublicAction(action?: EmailAction) {
