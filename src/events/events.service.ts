@@ -229,7 +229,7 @@ export class EventsService {
 			endsAt,
 			organization,
 			visibility: dto.visibility || 'public',
-			privateAccessToken: null,
+			privateAccessToken,
 			privateAccessTokenHash: privateAccessToken ? this.hashSecret(privateAccessToken) : null,
 			accessCodeHash: accessCode ? this.hashSecret(accessCode) : null,
 			accessCodeUpdatedAt: accessCode ? new Date() : null,
@@ -241,6 +241,7 @@ export class EventsService {
 			socialLinks: dto.socialLinks || {},
 			appearances: dto.appearances || [],
 			addOns: dto.addOns || [],
+			faqs: this.normalizeFaqs(dto.faqs),
 		});
 		const saved = await this.eventsRepository.save(event);
 		if (privateAccessToken) {
@@ -308,7 +309,9 @@ export class EventsService {
 			startsAt: nextStartsAt,
 			endsAt: nextEndsAt,
 			visibility: nextVisibility,
-			privateAccessToken: null,
+			privateAccessToken: nextVisibility === 'public'
+				? null
+				: generatedPrivateAccessToken || event.privateAccessToken || null,
 			privateAccessTokenHash: nextVisibility === 'public'
 				? null
 				: generatedPrivateAccessToken
@@ -321,6 +324,7 @@ export class EventsService {
 			socialLinks: dto.socialLinks ?? event.socialLinks,
 			appearances: dto.appearances ?? event.appearances,
 			addOns: dto.addOns ?? event.addOns,
+			faqs: dto.faqs !== undefined ? this.normalizeFaqs(dto.faqs) : event.faqs,
 		});
 
 		if (dto.accessCode !== undefined) {
@@ -365,13 +369,55 @@ export class EventsService {
 		return this.update(id, { status }, user, request);
 	}
 
+	async ensurePrivateLink(id: string, user?: { id: string; role: Role }, request?: Request) {
+		const event = await this.findOneEntity(id, user);
+		if ((event.visibility || 'public') !== 'private') {
+			throw new BadRequestException('Only private events can have private links.');
+		}
+		if (event.privateAccessToken) {
+			return {
+				event: this.toDashboardEvent(event),
+				privateAccessToken: event.privateAccessToken,
+				urlPath: `/events/${event.slug}?access=${encodeURIComponent(event.privateAccessToken)}`,
+			};
+		}
+
+		if (event.privateAccessTokenHash) {
+			await this.ensurePrivateAccessTokenRecordFromHash(event, event.privateAccessTokenHash, user?.id ?? null);
+		}
+
+		const privateAccessToken = this.generatePrivateAccessToken();
+		event.privateAccessToken = privateAccessToken;
+		event.privateAccessTokenHash = this.hashSecret(privateAccessToken);
+		const saved = await this.eventsRepository.save(event);
+		await this.createPrivateAccessTokenRecord(saved, privateAccessToken, user?.id ?? null);
+		await this.auditService.log(
+			'event.private_link.created',
+			user,
+			'event',
+			saved.id,
+			{ privateAccessToken: { before: 'missing', after: 'created' } },
+			{
+				organizationId: saved.organization?.id,
+				organizationName: saved.organization?.name,
+				eventTitle: saved.title,
+			},
+			request,
+		);
+		return {
+			event: this.withPrivateAccessToken(saved, privateAccessToken),
+			privateAccessToken,
+			urlPath: `/events/${saved.slug}?access=${encodeURIComponent(privateAccessToken)}`,
+		};
+	}
+
 	async regeneratePrivateLink(id: string, user?: { id: string; role: Role }, request?: Request) {
 		const event = await this.findOneEntity(id, user);
 		if ((event.visibility || 'public') !== 'private') {
 			throw new BadRequestException('Only private events can have private links.');
 		}
 		const privateAccessToken = this.generatePrivateAccessToken();
-		event.privateAccessToken = null;
+		event.privateAccessToken = privateAccessToken;
 		event.privateAccessTokenHash = this.hashSecret(privateAccessToken);
 		const saved = await this.eventsRepository.save(event);
 		await this.revokePrivateAccessTokens(saved.id, user?.id ?? null);
@@ -495,6 +541,7 @@ export class EventsService {
 			socialLinks: this.stableJson(event.socialLinks || {}),
 			appearances: this.stableJson(event.appearances || []),
 			addOns: this.stableJson(event.addOns || []),
+			faqs: this.stableJson(event.faqs || []),
 			status: event.status,
 			visibility: event.visibility,
 			refundsAllowed: event.refundsAllowed,
@@ -632,7 +679,6 @@ export class EventsService {
 		}
 		if (event.privateAccessToken && normalizedToken === event.privateAccessToken) {
 			await this.createPrivateAccessTokenRecord(event, normalizedToken, null);
-			event.privateAccessToken = null;
 			event.privateAccessTokenHash = tokenHash;
 			await this.eventsRepository.save(event);
 			return { allowed: true };
@@ -688,6 +734,16 @@ export class EventsService {
 		return Math.min(100, Math.max(0, Math.floor(numeric)));
 	}
 
+	private normalizeFaqs(faqs?: Array<{ question?: unknown; answer?: unknown }> | null) {
+		return (faqs || [])
+			.map((faq) => ({
+				question: String(faq.question ?? '').trim().slice(0, 220),
+				answer: String(faq.answer ?? '').trim().slice(0, 1200),
+			}))
+			.filter((faq) => faq.question && faq.answer)
+			.slice(0, 20);
+	}
+
 	private toPublicEvent(event: EventEntity) {
 		const organization = event.organization;
 		const {
@@ -736,7 +792,7 @@ export class EventsService {
 		} = event;
 		return {
 			...dashboardEvent,
-			privateAccessToken: null,
+			privateAccessToken: event.privateAccessToken || null,
 			hasAccessCode: Boolean(event.accessCodeHash),
 		};
 	}
@@ -773,6 +829,20 @@ export class EventsService {
 		return this.privateAccessTokensRepository.save(this.privateAccessTokensRepository.create({
 			event,
 			tokenHash: this.hashSecret(privateAccessToken),
+			status: 'active',
+			createdByUserId: createdByUserId || null,
+			useCount: 0,
+		}));
+	}
+
+	private async ensurePrivateAccessTokenRecordFromHash(event: EventEntity, tokenHash: string, createdByUserId?: string | null) {
+		const existing = await this.privateAccessTokensRepository.findOne({
+			where: { event: { id: event.id }, tokenHash },
+		});
+		if (existing) return existing;
+		return this.privateAccessTokensRepository.save(this.privateAccessTokensRepository.create({
+			event,
+			tokenHash,
 			status: 'active',
 			createdByUserId: createdByUserId || null,
 			useCount: 0,

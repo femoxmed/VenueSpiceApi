@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { BlogEntity } from '../../blogs/entities/blog.entity';
 import { UserEntity } from '../../auth/entities/user.entity';
 import { Role } from '../../common/enums/role.enum';
+import { Upload } from '../../uploads/entities/upload.entity';
 
 type BlogSeed = {
 	title: string;
@@ -12,6 +13,7 @@ type BlogSeed = {
 	category: string;
 	publishedAt: Date;
 	featuredAt: Date | null;
+	imageUrl: string;
 };
 
 const blogSeeds: BlogSeed[] = [
@@ -22,6 +24,7 @@ const blogSeeds: BlogSeed[] = [
 		category: 'Event Planning',
 		publishedAt: new Date('2026-07-20T09:00:00.000Z'),
 		featuredAt: new Date('2026-07-20T09:00:00.000Z'),
+		imageUrl: 'https://images.unsplash.com/photo-1511795409834-ef04bbd61622?auto=format&fit=crop&w=1400&q=80',
 		content: `A great event rarely feels complicated to the people attending it. That ease is usually the result of careful planning, clear decisions, and a team that understands what the night is meant to feel like.
 
 Start with one sharp promise. Is the event about discovery, celebration, networking, music, faith, food, or community? Once the promise is clear, every decision has a useful filter.
@@ -41,6 +44,7 @@ The best event planning is not just a checklist. It is the art of removing frict
 		category: 'Vendors',
 		publishedAt: new Date('2026-07-16T09:00:00.000Z'),
 		featuredAt: new Date('2026-07-16T09:00:00.000Z'),
+		imageUrl: 'https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1400&q=80',
 		content: `Vendors are not just suppliers. They are part of the event your guests will experience directly.
 
 Before comparing prices, define the job clearly. A caterer needs guest count, service style, timing, location, access, and dietary expectations. A DJ needs audience profile, program flow, sound restrictions, and the moments that matter most.
@@ -60,6 +64,7 @@ The goal is not to choose the most expensive vendor. It is to choose the one who
 		category: 'Influencer Marketing',
 		publishedAt: new Date('2026-07-11T09:00:00.000Z'),
 		featuredAt: new Date('2026-07-11T09:00:00.000Z'),
+		imageUrl: 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1400&q=80',
 		content: `Influencer campaigns are often treated like emergency promotion. Sales slow down, pressure rises, and organizers start asking creators to push harder. That is usually too late.
 
 Creators perform best when they have time to understand the event and make the invitation feel natural to their audience. Early campaigns create awareness, social proof, and repeated exposure before urgency arrives.
@@ -79,6 +84,7 @@ Promotion is strongest when it feels like participation. Bring creators in early
 		category: 'Ticketing',
 		publishedAt: new Date('2026-07-07T09:00:00.000Z'),
 		featuredAt: null,
+		imageUrl: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?auto=format&fit=crop&w=1400&q=80',
 		content: `Ticket tiers can help sales, but only when buyers understand the difference quickly.
 
 Start with names people already recognize. Regular, VIP, Table for 5, Early Bird, Backstage, and Group Access are clearer than creative labels that need explanation.
@@ -98,6 +104,7 @@ Good ticketing is not just payment collection. It is decision design. The easier
 		category: 'Attendee Experience',
 		publishedAt: new Date('2026-07-02T09:00:00.000Z'),
 		featuredAt: null,
+		imageUrl: 'https://images.unsplash.com/photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=1400&q=80',
 		content: `After a guest buys a ticket, they need confidence.
 
 The confirmation email should make the next step obvious. It should show the event name, date, venue, ticket type, quantity, buyer details, and a simple way to find the ticket again.
@@ -117,6 +124,7 @@ A smooth event starts long before check-in. It starts when the buyer feels sure 
 		category: 'Vendor Growth',
 		publishedAt: new Date('2026-06-28T09:00:00.000Z'),
 		featuredAt: null,
+		imageUrl: 'https://images.unsplash.com/photo-1414235077428-338989a2e8c0?auto=format&fit=crop&w=1400&q=80',
 		content: `A vendor profile creates attention. A vendor catalogue creates decisions.
 
 Each catalogue item should have a clear name, strong image, price or price range, minimum order quantity, unit measure, and a short description that explains the result.
@@ -136,24 +144,60 @@ export async function seedBlogs(dataSource: DataSource) {
 	const author = await ensureBlogAuthor(dataSource);
 
 	for (const seed of blogSeeds) {
-		const existing = await blogs.findOne({ where: { slug: seed.slug } });
+		const image = await ensureSeedUpload(dataSource, seed);
+		const { imageUrl: _imageUrl, ...blogData } = seed;
+		const existing = await blogs.findOne({ where: { slug: seed.slug }, relations: ['bannerImage', 'thumbnailImage'] });
 		if (existing) {
+			existing.bannerImage = image;
+			existing.thumbnailImage = image;
+			existing.featuredAt = seed.featuredAt;
+			existing.publishedAt = seed.publishedAt;
+			await blogs.save(existing);
 			console.log(`Skipped existing blog: ${seed.slug}`);
 			continue;
 		}
 
 		await blogs.save(
 			blogs.create({
-				...seed,
+				...blogData,
 				status: 'published',
 				author,
 				authorId: author.id,
 				readTimeMinutes: calculateReadTime(seed.content),
+				bannerImage: image,
+				thumbnailImage: image,
 				relatedProducts: [],
 			}),
 		);
 		console.log(`Created blog: ${seed.slug}`);
 	}
+}
+
+async function ensureSeedUpload(dataSource: DataSource, seed: BlogSeed) {
+	const uploads = dataSource.getRepository(Upload);
+	const key = `seed/blogs/${seed.slug}.jpg`;
+	const existing = await uploads.findOne({ where: { key } });
+	if (existing) {
+		existing.url = seed.imageUrl;
+		existing.path = seed.imageUrl;
+		existing.originalName = `${seed.slug}.jpg`;
+		existing.mimeType = 'image/jpeg';
+		existing.status = 'completed';
+		existing.isPublic = true;
+		return uploads.save(existing);
+	}
+
+	return uploads.save(uploads.create({
+		key,
+		path: seed.imageUrl,
+		url: seed.imageUrl,
+		originalName: `${seed.slug}.jpg`,
+		mimeType: 'image/jpeg',
+		size: 0,
+		variants: null,
+		status: 'completed',
+		isPublic: true,
+	}));
 }
 
 async function ensureBlogAuthor(dataSource: DataSource) {

@@ -87,6 +87,17 @@ export class EventsController {
 	@ApiBearerAuth()
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
+	@Post(':id/private-link/ensure')
+	ensurePrivateLink(
+		@Param('id') id: string,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.eventsService.ensurePrivateLink(id, req.user, req as any);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 	@Post(':id/private-link/regenerate')
 	regeneratePrivateLink(
 		@Param('id') id: string,

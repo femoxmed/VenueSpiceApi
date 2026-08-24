@@ -79,6 +79,9 @@ export class EventEntity {
 	@Column({ name: 'add_ons', type: 'jsonb', default: () => "'[]'" })
 	addOns: Array<Record<string, unknown>>;
 
+	@Column({ name: 'faqs', type: 'jsonb', default: () => "'[]'" })
+	faqs: Array<{ question: string; answer: string }>;
+
 	@Column({ type: 'varchar', default: 'draft' })
 	status: 'draft' | 'published' | 'cancelled' | 'archived';
 

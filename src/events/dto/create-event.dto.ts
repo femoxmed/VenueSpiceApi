@@ -65,6 +65,14 @@ export class CreateTicketTypeDto {
 	includeCharges?: boolean;
 }
 
+export class EventFaqDto {
+	@IsString()
+	question: string;
+
+	@IsString()
+	answer: string;
+}
+
 export class CreateEventDto {
 	@IsString()
 	organizationId: string;
@@ -143,6 +151,12 @@ export class CreateEventDto {
 	@IsOptional()
 	@IsArray()
 	addOns?: Array<Record<string, unknown>>;
+
+	@IsOptional()
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => EventFaqDto)
+	faqs?: EventFaqDto[];
 
 	@IsOptional()
 	@IsIn(['draft', 'published', 'cancelled', 'archived'])
