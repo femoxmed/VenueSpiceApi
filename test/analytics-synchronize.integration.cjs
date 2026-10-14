@@ -52,14 +52,14 @@ async function main() {
       const found=new Set(result.rows.map(r=>r.column_name));for(const column of columns) assert.ok(found.has(column),`${table}.${column}`);
     }
     const indexes=await client.query("SELECT indexname FROM pg_indexes WHERE schemaname=$1 AND indexname LIKE 'analytics_%'",[schema]);
-    assert.equal(indexes.rows.length,7);
+    assert.equal(indexes.rows.length,9);
     assert.equal((await client.query('SELECT analytics_session_id,tax_provider FROM ticket_orders')).rows[0].analytics_session_id,null);
     assert.equal((await client.query('SELECT tax_provider FROM ticket_orders')).rows[0].tax_provider,'none');
     await client.query(`INSERT INTO analytics_events(id,name,visitor_id,session_id,page) VALUES ($1,'page_view',$2,$3,'home')`,[id(5),id(6),id(7)]);
     await db.synchronize();
     assert.equal((await client.query('SELECT count(*)::int AS count FROM analytics_events')).rows[0].count,1);
     assert.deepEqual((await client.query('SELECT id,total,status FROM ticket_orders')).rows,before.rows);
-    console.log(`Synchronization checks passed for ${entities.length} entity definitions: existing sample records preserved; all known new columns, tracking table and seven indexes created; repeat synchronization preserves sample order and telemetry data.`);
+    console.log(`Synchronization checks passed for ${entities.length} entity definitions: existing sample records preserved; all known new columns, tracking table and nine indexes created; repeat synchronization preserves sample order and telemetry data.`);
   } finally {
     if(db?.isInitialized) await db.destroy();
     await client.query(`DROP SCHEMA ${schema} CASCADE`);await client.end();

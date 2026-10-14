@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { ReportQueryDto } from './dto/report-query.dto';
 
-export const REPORTS = ['registrations', 'event-creation', 'organizer-adoption', 'ticket-sales', 'revenue'] as const;
+export const REPORTS = ['registrations', 'event-creation', 'organizer-adoption', 'ticket-sales', 'revenue', 'website-traffic', 'user-engagement', 'checkout-conversion'] as const;
 export type ReportName = typeof REPORTS[number];
 export function reportPeriod(query: ReportQueryDto) {
   const parse = (value: string) => {
@@ -22,10 +22,10 @@ export function csvCell(value: unknown) {
   const text = String(value ?? '');
   return `"${(typeof value === 'string' && /^[\s]*[=+\-@]/.test(text) ? "'" : '') + text.replace(/"/g, '""')}"`;
 }
-export function reportCsv(report: { report: string; timezone: string; start: string; end: string; organizationId: string | null; eventId: string | null; columns: { key: string; label: string }[]; rows: Record<string, unknown>[]; previousRows: Record<string, unknown>[] }) {
-  const metadata = [report.report, report.timezone, report.start, report.end, report.organizationId, report.eventId];
-  const headers = ['Report', 'Timezone', 'Selected start', 'Selected end', 'Organization filter', 'Event filter', 'Period', 'Bucket', 'Currency', ...report.columns.map(c => c.label)];
-  return [headers.map(csvCell).join(','), ...[['current', report.rows], ['previous', report.previousRows]].flatMap(([period, rows]) =>
-    (rows as Record<string, unknown>[]).map(row => [...metadata, period, row.bucket, row.currency, ...report.columns.map(c => row[c.key])].map(csvCell).join(','))
+export function reportCsv(report: { report: string; timezone: string; start: string; end: string; organizationId: string | null; eventId: string | null; definition?: string; generatedAt?: string; coverage?: { firstObservedAt: string | Date | null; retentionDays: number } | null; columns: { key: string; label: string; unit?: string }[]; rows: Record<string, unknown>[]; previousRows: Record<string, unknown>[]; totals?: Record<string, unknown>[]; previousTotals?: Record<string, unknown>[] }) {
+  const metadata = [report.report, report.timezone, report.start, report.end, report.organizationId, report.eventId, report.definition, report.generatedAt, report.coverage?.firstObservedAt instanceof Date ? report.coverage.firstObservedAt.toISOString() : report.coverage?.firstObservedAt, report.coverage?.retentionDays];
+  const headers = ['Report', 'Timezone', 'Selected start', 'Selected end', 'Organization filter', 'Event filter', 'Definition', 'Generated at', 'First retained tracking activity', 'Tracking retention days', 'Period', 'Row type', 'Bucket', 'Currency', ...report.columns.map(c => `${c.label}${c.unit === 'percent' ? ' (%)' : c.unit === 'seconds' ? ' (seconds)' : ''}`)];
+  return [headers.map(csvCell).join(','), ...[['current', 'bucket', report.rows], ['current', 'total', report.totals || []], ['previous', 'bucket', report.previousRows], ['previous', 'total', report.previousTotals || []]].flatMap(([period, kind, rows]) =>
+    (rows as Record<string, unknown>[]).map(row => [...metadata, period, kind, row.bucket, row.currency, ...report.columns.map(c => row[c.key])].map(csvCell).join(','))
   )].join('\r\n');
 }

@@ -20,4 +20,6 @@ CREATE INDEX IF NOT EXISTS analytics_items_order_idx ON ticket_order_items("orde
 CREATE INDEX IF NOT EXISTS analytics_events_created_idx ON events(created_at, "organizationId");
 CREATE INDEX IF NOT EXISTS analytics_users_created_idx ON users(created_at);
 CREATE INDEX IF NOT EXISTS analytics_refunds_completed_idx ON refund_requests(completed_at) WHERE status = 'succeeded';
+CREATE INDEX IF NOT EXISTS analytics_events_event_received_idx ON analytics_events(event_id, received_at);
+CREATE INDEX IF NOT EXISTS analytics_orders_attribution_idx ON ticket_orders(analytics_session_id, analytics_visitor_id, "eventId");
 COMMIT;

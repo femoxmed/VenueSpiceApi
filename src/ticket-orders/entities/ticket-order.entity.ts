@@ -15,6 +15,7 @@ import { TicketOrderItemEntity } from './ticket-order-item.entity';
 import { IssuedTicketEntity } from './issued-ticket.entity';
 
 @Entity('ticket_orders')
+@Index('analytics_orders_attribution_idx', ['analyticsSessionId', 'analyticsVisitorId', 'event'])
 @Index('analytics_orders_paid_idx', ['paidAt', 'organization', 'event'])
 export class TicketOrderEntity {
 	@PrimaryGeneratedColumn('uuid')

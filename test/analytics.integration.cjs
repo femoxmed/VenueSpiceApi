@@ -25,7 +25,7 @@ async function main() {
       CREATE TABLE organizations(id uuid, created_at timestamptz, type text, owner_user_id uuid);
       CREATE TABLE organization_members(organization_id uuid, user_id uuid, status text);
       CREATE TABLE events(id uuid, "organizationId" uuid, created_at timestamptz, status text);
-      CREATE TABLE ticket_orders(id uuid, "organizationId" uuid, "eventId" uuid, paid_at timestamptz, status text, currency text, subtotal numeric, total numeric, platform_fee numeric, processing_fee numeric, fee_snapshot jsonb);
+      CREATE TABLE ticket_orders(id uuid, "organizationId" uuid, "eventId" uuid, paid_at timestamptz, status text, currency text, subtotal numeric, total numeric, platform_fee numeric, processing_fee numeric, fee_snapshot jsonb, tax numeric NOT NULL DEFAULT 0);
       CREATE TABLE ticket_order_items("orderId" uuid, quantity int, unit_price numeric);
       CREATE TABLE refund_requests(order_id varchar, status text, completed_at timestamptz, currency text, amount numeric);
     `);
@@ -43,6 +43,7 @@ async function main() {
       ($8,$4,$6,NULL,'pending','USD',999,999,999,0,'{}')`,[id(30),id(31),id(32),id(10),id(11),id(20),id(21),id(33)]);
     await client.query(`INSERT INTO ticket_order_items VALUES ($1,2,50),($1,1,0),($2,4,50),($3,1,50)`,[id(30),id(31),id(32)]);
     await client.query(`INSERT INTO refund_requests VALUES ($1,'succeeded','2026-01-05','USD',55),($1,'requested',NULL,'USD',55)`,[id(30)]);
+    await client.query("UPDATE ticket_orders SET tax = CASE WHEN currency = 'NGN' THEN 19 ELSE 7 END");
     const service = new AnalyticsService({ query: async (sql, args) => (await client.query(sql,args)).rows });
     const admin = {id:id(1),role:'admin'};
     const query = {start:'2026-01-01',end:'2026-01-31',groupBy:'day'};
@@ -57,6 +58,8 @@ async function main() {
     const revenue = await service.report('revenue',query,admin);
     assert.equal(revenue.totals.length,2);
     const usd = revenue.totals.find(r=>r.currency==='USD');
+    assert.equal(usd.taxCollected,7); assert.equal(revenue.totals.find(r=>r.currency==='NGN').taxCollected,19); assert.equal(revenue.previousTotals.find(r=>r.currency==='USD').taxCollected,7);
+    assert.match(reportCsv(revenue), /Tax collected/);
     assert.equal(usd.grossSales,100); assert.equal(usd.refunds,55); assert.equal(usd.estimatedNetRevenue,5);
     const owner = {id:id(1),role:'user'};
     assert.equal((await service.report('ticket-sales',{...query,organizationId:id(10)},owner)).totals[0].tickets,3);
@@ -101,7 +104,76 @@ async function main() {
       await tracking.prune();
       assert.equal((await client.query('SELECT count(*)::int AS count FROM analytics_events')).rows[0].count,1);
     } finally { await orm.destroy(); }
-    console.log('Analytics integration checks passed: five reports, boundaries, zero buckets, comparisons, currency isolation, refunds, membership/exports, migration reruns, tracking validation, deduplication, and rate limits.');
+
+    // Tracking fixtures: duplicate signals, multiple sessions, cross-org isolation and confirmed outcomes.
+    await client.query('TRUNCATE analytics_events');
+    let trackingId=100;
+    const record=async (visitor,session,event,name,at,seconds=0)=>client.query(
+      `INSERT INTO analytics_events(id,visitor_id,session_id,event_id,name,page,received_at,engaged_seconds)
+       VALUES ($1,$2,$3,$4,$5,'event_detail',$6,$7)`,[id(trackingId++),id(visitor),id(session),event===null?null:id(event),name,at,seconds]);
+    await record(70,80,20,'page_view','2025-12-30T12:00:00Z');
+    await record(70,81,20,'page_view','2026-01-01T10:00:00Z');
+    await record(70,81,20,'page_view','2026-01-01T10:01:00Z');
+    await record(70,81,20,'engagement','2026-01-01T10:02:00Z',30);
+    await record(70,81,20,'ticket_selected','2026-01-01T10:03:00Z');
+    await record(70,81,20,'ticket_selected','2026-01-01T10:04:00Z');
+    await record(70,81,20,'checkout_started','2026-01-01T10:05:00Z');
+    await record(70,81,20,'checkout_started','2026-01-01T10:06:00Z');
+    await record(70,82,20,'page_view','2026-01-02T10:00:00Z');
+    await record(70,82,20,'engagement','2026-01-02T10:01:00Z',60);
+    await record(71,83,20,'page_view','2026-01-02T11:00:00Z');
+    await record(71,83,20,'checkout_started','2026-01-02T11:01:00Z');
+    await record(72,84,21,'page_view','2026-01-02T12:00:00Z');
+    await record(73,85,null,'page_view','2026-01-02T12:00:00Z');
+    // An org-B visit must not make this person a returning visitor within org A.
+    await record(71,86,21,'page_view','2025-12-20T12:00:00Z');
+    await client.query(`UPDATE ticket_orders SET analytics_session_id=$1,analytics_visitor_id=$2,paid_at='2026-01-01T10:07:00Z' WHERE id=$3`,[id(81),id(70),id(30)]);
+    // A repeated paid order in the same journey must not inflate conversion.
+    await client.query(`UPDATE ticket_orders SET analytics_session_id=$1,analytics_visitor_id=$2,paid_at='2026-01-01T10:08:00Z',status='paid' WHERE id=$3`,[id(81),id(70),id(33)]);
+    const tracked={...query,organizationId:id(10)};
+    const traffic=await service.report('website-traffic',tracked,owner);
+    assert.equal(traffic.totals[0].visitors,2);assert.equal(traffic.totals[0].sessions,3);assert.equal(traffic.totals[0].pageViews,4);
+    assert.equal(traffic.totals[0].pagesPerSession,1.33);assert.equal(traffic.previousTotals[0].pageViews,1);
+    assert.equal(new Date(traffic.coverage.firstObservedAt).toISOString(),'2025-12-30T12:00:00.000Z');
+    assert.equal((await service.report('website-traffic',query,admin)).totals[0].visitors,4);
+    const engagement=await service.report('user-engagement',tracked,owner);
+    assert.equal(engagement.totals[0].activeVisitors,2);assert.equal(engagement.totals[0].returningVisitors,1);
+    assert.equal(engagement.totals[0].returningRate,50);assert.equal(engagement.totals[0].engagedSeconds,90);
+    assert.equal(engagement.totals[0].avgEngagementSeconds,30);assert.equal(engagement.totals[0].engagedVisitors,1);
+    assert.equal((await service.report('user-engagement',query,admin)).totals[0].returningVisitors,2);
+    const funnel=await service.report('checkout-conversion',tracked,owner);
+    assert.equal(funnel.totals[0].journeys,3);assert.equal(funnel.totals[0].selected,1);assert.equal(funnel.totals[0].started,2);
+    assert.equal(funnel.totals[0].completed,1);assert.equal(funnel.totals[0].pending,0);assert.equal(funnel.totals[0].abandoned,1);assert.equal(funnel.totals[0].conversionRate,50);
+    for(const report of ['website-traffic','user-engagement','checkout-conversion']) {
+      await assert.rejects(()=>service.report(report,query,owner),/Select an organization/);
+      await assert.rejects(()=>service.report(report,{...query,organizationId:id(11)},owner),/cannot access/);
+      await assert.rejects(()=>controller.export(report,{...query,organizationId:id(11)},{user:owner},{}),/cannot access/);
+      const grouped=await service.report(report,{...tracked,groupBy:'month'},owner);
+      assert.deepEqual(grouped.totals,funnel.report===report?funnel.totals:report==='website-traffic'?traffic.totals:engagement.totals);
+      const blank=await service.report(report,{...tracked,start:'2024-01-01',end:'2024-01-02'},owner);
+      assert.equal(blank.rows.length,2);
+      assert.equal(blank.totals[0][report==='website-traffic'?'pagesPerSession':report==='user-engagement'?'returningRate':'conversionRate'],null);
+    }
+    assert.match(reportCsv(engagement),/Average engaged time per active session \(seconds\)/);
+    assert.match(reportCsv(funnel),/Checkout conversion rate \(%\)/);
+    // A second event with the same browser session is a separate journey and cannot inherit a payment.
+    await record(70,81,22,'checkout_started','2026-01-01T10:05:00Z');
+    assert.equal((await service.report('checkout-conversion',{...tracked,eventId:id(22)},owner)).totals[0].completed,0);
+    // Cohort belongs to the first activity date even when payment crosses a reporting boundary.
+    await record(74,87,20,'page_view','2026-01-31T23:58:00Z');
+    await record(74,87,20,'checkout_started','2026-01-31T23:59:00Z');
+    await client.query(`INSERT INTO ticket_orders(id,"organizationId","eventId",paid_at,status,currency,subtotal,total,platform_fee,processing_fee,fee_snapshot,tax,analytics_session_id,analytics_visitor_id)
+      VALUES ($1,$2,$3,'2026-02-01T00:01:00Z','paid','USD',0,0,0,0,'{}',0,$4,$5)`,[id(34),id(10),id(20),id(87),id(74)]);
+    assert.equal((await service.report('checkout-conversion',{...tracked,start:'2026-01-31',end:'2026-01-31'},owner)).totals[0].completed,1);
+    assert.equal((await service.report('checkout-conversion',{...tracked,start:'2026-02-01',end:'2026-02-01'},owner)).totals[0].journeys,0);
+    // Late payments remain outside the explicit 24-hour completion window.
+    await client.query("UPDATE ticket_orders SET paid_at='2026-02-02T00:00:00Z' WHERE id=$1",[id(34)]);
+    assert.equal((await service.report('checkout-conversion',{...tracked,start:'2026-01-31',end:'2026-01-31'},owner)).totals[0].abandoned,1);
+    const now=new Date();const today=now.toISOString().slice(0,10);
+    await record(75,88,20,'checkout_started',now.toISOString());
+    const ongoing=await service.report('checkout-conversion',{...tracked,start:today,end:today},owner);
+    assert.equal(ongoing.totals[0].pending,1);assert.equal(ongoing.totals[0].abandoned,0);
+    console.log('Analytics integration checks passed: eight reports, tax, tracking cohorts, weighted rates, privacy scopes, boundaries, zero buckets, comparisons, currency isolation, refunds, membership/exports, migration reruns, tracking validation, deduplication, and rate limits.');
   } finally {
     await client.query(`DROP SCHEMA ${schema} CASCADE`); await client.end();
   }
