@@ -14,7 +14,7 @@ import { join } from 'path';
 import type { Request, Response, NextFunction } from 'express';
 
 async function bootstrap() {
-	const app = await NestFactory.create(AppModule);
+	const app = await NestFactory.create(AppModule, { rawBody: true });
 	const configService = app.get(ConfigService);
 	const apiPrefix = configService.get<string>('API_PREFIX', 'api');
 

@@ -22,4 +22,13 @@ CREATE INDEX IF NOT EXISTS analytics_users_created_idx ON users(created_at);
 CREATE INDEX IF NOT EXISTS analytics_refunds_completed_idx ON refund_requests(completed_at) WHERE status = 'succeeded';
 CREATE INDEX IF NOT EXISTS analytics_events_event_received_idx ON analytics_events(event_id, received_at);
 CREATE INDEX IF NOT EXISTS analytics_orders_attribution_idx ON ticket_orders(analytics_session_id, analytics_visitor_id, "eventId");
+ALTER TABLE analytics_events ADD COLUMN IF NOT EXISTS promoter_id uuid;
+ALTER TABLE analytics_events ADD COLUMN IF NOT EXISTS referral_code_id uuid;
+ALTER TABLE analytics_events ADD COLUMN IF NOT EXISTS country varchar(100);
+ALTER TABLE analytics_events ADD COLUMN IF NOT EXISTS state varchar(100);
+ALTER TABLE analytics_events ADD COLUMN IF NOT EXISTS city varchar(100);
+CREATE TABLE IF NOT EXISTS analytics_disputes (
+ id varchar PRIMARY KEY, payment_intent_id varchar NOT NULL, amount_minor bigint NOT NULL,
+ currency varchar NOT NULL, occurred_at timestamptz NOT NULL
+);
 COMMIT;

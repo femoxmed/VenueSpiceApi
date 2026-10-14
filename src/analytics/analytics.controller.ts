@@ -7,6 +7,7 @@ import { AnalyticsService } from './analytics.service';
 import { TrackingService } from './tracking.service';
 import { ReportQueryDto } from './dto/report-query.dto';
 import { TrackEventDto } from './dto/track-event.dto';
+import { reportXlsx } from './report-xlsx';
 import { reportCsv } from './report-utils';
 
 @Controller('analytics')
@@ -23,6 +24,11 @@ export class AnalyticsController {
   async export(@Param('report') report: string, @Query() query: ReportQueryDto, @Req() req: { user: { id: string; role: Role } }, @Res() res: Response) {
     const data = await this.analytics.report(report, query, req.user);
     res.setHeader('Cache-Control', 'private, no-store');
+    if (query.format === 'xlsx') {
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${data.report}-${data.start}-${data.end}.xlsx"`);
+      return res.send(await reportXlsx(data));
+    }
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="${data.report}-${data.start}-${data.end}.csv"`);
     res.send('\uFEFF' + reportCsv(data));
@@ -41,6 +47,16 @@ export class AnalyticsController {
     if (rate.count >= 120 || (!this.rates.has(key) && this.rates.size >= 10000)) throw new HttpException('Too many tracking requests', 429);
     rate.count++;
     this.rates.set(key, rate);
-    return this.tracking.record(dto);
+    const geo: { country?: string; state?: string; city?: string } = {};
+    // Enable only behind CloudFront with direct origin access blocked and these headers overwritten.
+    if (this.config.get('ANALYTICS_TRUST_CLOUDFRONT_GEO', 'false') === 'true') {
+      for (const [key, header] of Object.entries({ country: 'cloudfront-viewer-country', state: 'cloudfront-viewer-country-region-name', city: 'cloudfront-viewer-city' })) {
+        const value = req.headers[header];
+        if (typeof value === 'string') {
+          try { geo[key as keyof typeof geo] = decodeURIComponent(value).replace(/[\x00-\x1f]/g, '').slice(0, 100); } catch { /* Invalid geo remains unknown. */ }
+        }
+      }
+    }
+    return this.tracking.record(dto, geo);
   }
 }

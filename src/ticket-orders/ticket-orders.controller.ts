@@ -1,3 +1,5 @@
+import { ConfigService } from '@nestjs/config';
+import { verifyStripeWebhook } from './stripe-webhook-signature';
 import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { UserEntity } from '../auth/entities/user.entity';
@@ -14,7 +16,7 @@ import { TicketOrdersService } from './ticket-orders.service';
 @ApiTags('Ticket Orders')
 @Controller('ticket-orders')
 export class TicketOrdersController {
-	constructor(private readonly ticketOrdersService: TicketOrdersService) {}
+	constructor(private readonly ticketOrdersService: TicketOrdersService, private readonly config: ConfigService) {}
 
 	@Post('checkout')
 	createCheckoutSession(@Body() dto: CreateCheckoutSessionDto) {
@@ -32,7 +34,8 @@ export class TicketOrdersController {
 	}
 
 	@Post('stripe/webhook')
-	handleStripeWebhook(@Body() payload: any) {
+	handleStripeWebhook(@Body() payload: any, @Req() req: Request & { rawBody?: Buffer }) {
+        verifyStripeWebhook(req.rawBody, req.get('stripe-signature'), this.config.get<string>('STRIPE_WEBHOOK_SECRET'));
 		return this.ticketOrdersService.handleStripeWebhook(payload);
 	}
 

@@ -1,3 +1,4 @@
+import { AnalyticsDisputeEntity } from './analytics/entities/analytics-dispute.entity';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AnalyticsEventEntity } from './analytics/entities/analytics-event.entity';
 import { Module } from '@nestjs/common';
@@ -123,6 +124,7 @@ function getBullQueuePrefix(value?: string | null) {
 					configService.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
 				autoLoadEntities: false,
 				entities: [
+                    AnalyticsDisputeEntity,
 					AnalyticsEventEntity,
 					UserEntity,
 					PasswordResetRecordEntity,

@@ -1,3 +1,4 @@
+import { dimensions, extendedColumns, extendedDefinitions, extendedQuery } from './extended-reports';
 import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Role } from '../common/enums/role.enum';
@@ -8,6 +9,7 @@ type Viewer = { id: string; role: Role };
 type ReportColumn = { key: string; label: string; unit?: 'percent' | 'seconds' | 'decimal'; nullable?: boolean };
 const trackingReports: ReportName[] = ['website-traffic', 'user-engagement', 'checkout-conversion'];
 const columns: Record<ReportName, ReportColumn[]> = {
+  ...extendedColumns,
   registrations: [{ key: 'registrations', label: 'New accounts' }],
   'event-creation': [{ key: 'events', label: 'Events created' }],
   'organizer-adoption': [{ key: 'registered', label: 'New organizers' }, { key: 'active', label: 'Active organizers' }, { key: 'published', label: 'Organizers with published events created in period' }],
@@ -18,6 +20,7 @@ const columns: Record<ReportName, ReportColumn[]> = {
   'checkout-conversion': [{ key: 'journeys', label: 'Tracked event journeys' }, { key: 'selected', label: 'Journeys selecting tickets' }, { key: 'started', label: 'Journeys starting checkout' }, { key: 'completed', label: 'Completed within 24 hours' }, { key: 'pending', label: 'Still within conversion window' }, { key: 'abandoned', label: 'Not converted within 24 hours' }, { key: 'conversionRate', label: 'Checkout conversion rate', unit: 'percent', nullable: true }],
 };
 const definitions: Record<ReportName, string> = {
+  ...extendedDefinitions,
   registrations: 'Accounts created during the period, including unverified accounts. Platform-wide; event/organizer attribution is unavailable.',
   'event-creation': 'Events counted by creation date, including drafts and cancelled events.',
   'organizer-adoption': 'Organizers are organizations of type organization. Active means created an event or received a confirmed order in the period. Published means currently published events created in the period; publication history is unavailable. Distinct organizer totals are calculated independently of chart buckets.',
@@ -58,11 +61,12 @@ export class AnalyticsService {
     const [current, previous, coverage] = await Promise.all([
       this.aggregate(report, query, period.start, period.end, period.groupBy, asOf),
       this.aggregate(report, query, period.previousStart, period.start, period.groupBy, asOf),
-      trackingReports.includes(report) ? this.trackingCoverage(query, asOf) : Promise.resolve(null),
+      [...trackingReports, 'traffic-source', 'event-performance', 'promoter-referral', 'geographic'].includes(report) ? this.trackingCoverage(query, asOf) : Promise.resolve(null),
     ]);
     return { generatedAt: asOf.toISOString(), coverage, report, timezone: 'UTC', start: query.start, end: query.end, groupBy: period.groupBy,
       organizationId: query.organizationId || null, eventId: query.eventId || null,
       previousStart: period.previousStart.toISOString().slice(0, 10), previousEnd: new Date(period.start.getTime() - 86400000).toISOString().slice(0, 10),
+      dimensions: dimensions[report] || [], breakdown: current.breakdown, previousBreakdown: previous.breakdown,
       definition: definitions[report], columns: columns[report], rows: current.rows, totals: current.totals,
       previousRows: previous.rows, previousTotals: previous.totals };
   }
@@ -132,20 +136,23 @@ export class AnalyticsService {
     let source: string;
     let measures: string;
     let money = false;
-    if (trackingReports.includes(report)) {
+    const extended = extendedQuery(report);
+    if (extended) {
+      ({ source, measures } = extended); money = 'money' in extended && extended.money === true;
+    } else if (trackingReports.includes(report)) {
       ({ source, measures } = this.trackingQuery(report));
     } else if (report === 'registrations') {
-      source = `SELECT created_at AS at, ''::text AS currency FROM users WHERE created_at >= $1 AND created_at < $2`;
+      source = `SELECT (created_at AT TIME ZONE 'UTC') AS at, ''::text AS currency FROM users WHERE (created_at AT TIME ZONE 'UTC') >= $1 AND (created_at AT TIME ZONE 'UTC') < $2`;
       measures = `COUNT(*) AS registrations`;
     } else if (report === 'event-creation') {
-      source = `SELECT e.created_at AS at, ''::text AS currency FROM events e WHERE e.created_at >= $1 AND e.created_at < $2 AND ${scope('e')}`;
+      source = `SELECT (e.created_at AT TIME ZONE 'UTC') AS at, ''::text AS currency FROM events e WHERE (e.created_at AT TIME ZONE 'UTC') >= $1 AND (e.created_at AT TIME ZONE 'UTC') < $2 AND ${scope('e')}`;
       measures = `COUNT(*) AS events`;
     } else if (report === 'organizer-adoption') {
-      source = `WITH eligible AS (SELECT o.id, o.created_at FROM organizations o WHERE o.type = 'organization' AND ($3::uuid IS NULL OR o.id = $3) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM events e WHERE e.id = $4 AND e."organizationId" = o.id)))
+      source = `WITH eligible AS (SELECT o.id, (o.created_at AT TIME ZONE 'UTC') AS created_at FROM organizations o WHERE o.type = 'organization' AND ($3::uuid IS NULL OR o.id = $3) AND ($4::uuid IS NULL OR EXISTS (SELECT 1 FROM events e WHERE e.id = $4 AND e."organizationId" = o.id)))
       SELECT o.created_at AS at, ''::text AS currency, o.id, 'registered' AS kind FROM eligible o WHERE o.created_at >= $1 AND o.created_at < $2
-      UNION ALL SELECT e.created_at, '', o.id, 'active' FROM events e JOIN eligible o ON o.id = e."organizationId" WHERE e.created_at >= $1 AND e.created_at < $2 AND ($4::uuid IS NULL OR e.id = $4)
+      UNION ALL SELECT (e.created_at AT TIME ZONE 'UTC'), '', o.id, 'active' FROM events e JOIN eligible o ON o.id = e."organizationId" WHERE (e.created_at AT TIME ZONE 'UTC') >= $1 AND (e.created_at AT TIME ZONE 'UTC') < $2 AND ($4::uuid IS NULL OR e.id = $4)
       UNION ALL SELECT t.paid_at, '', o.id, 'active' FROM ticket_orders t JOIN eligible o ON o.id = t."organizationId" WHERE t.paid_at >= $1 AND t.paid_at < $2 AND t.status IN ('paid','refunded') AND ($4::uuid IS NULL OR t."eventId" = $4)
-      UNION ALL SELECT e.created_at, '', o.id, 'published' FROM events e JOIN eligible o ON o.id = e."organizationId" WHERE e.status = 'published' AND e.created_at >= $1 AND e.created_at < $2 AND ($4::uuid IS NULL OR e.id = $4)`;
+      UNION ALL SELECT (e.created_at AT TIME ZONE 'UTC'), '', o.id, 'published' FROM events e JOIN eligible o ON o.id = e."organizationId" WHERE e.status = 'published' AND (e.created_at AT TIME ZONE 'UTC') >= $1 AND (e.created_at AT TIME ZONE 'UTC') < $2 AND ($4::uuid IS NULL OR e.id = $4)`;
       measures = `COUNT(DISTINCT id) FILTER (WHERE kind = 'registered') AS registered, COUNT(DISTINCT id) FILTER (WHERE kind = 'active') AS active, COUNT(DISTINCT id) FILTER (WHERE kind = 'published') AS published`;
     } else if (report === 'ticket-sales') {
       source = `SELECT t.paid_at AS at, ''::text AS currency, t.id,
@@ -171,6 +178,9 @@ export class AnalyticsService {
       totals AS (SELECT 'total'::text AS bucket, currency, ${measures} FROM source GROUP BY currency)
       SELECT 'row' AS kind, * FROM aggregated UNION ALL SELECT 'total' AS kind, * FROM totals ORDER BY bucket, currency`;
     const result = await this.db.query(sql, params);
+    const dims = dimensions[report] || [];
+    const dimSql = dims.map(d => `"${d.key}"`).join(',');
+    const detail = dims.length ? await this.db.query(`WITH bounds AS (SELECT $1::timestamptz,$2::timestamptz,$3::uuid,$4::uuid,$5::text,$6::timestamptz), source AS (${source}) SELECT 'breakdown' AS bucket,currency,${dimSql},${measures} FROM source GROUP BY currency,${dimSql} ORDER BY currency,${dimSql}`, params) : [];
     const keys = columns[report].map(c => c.key);
     const normalize = (row: Record<string, unknown>) => Object.fromEntries(Object.entries(row).filter(([k]) => k !== 'kind').map(([k,v]) => [k, keys.includes(k) && v !== null ? Number(Number(v).toFixed(2)) : v]));
     const totals = result.filter((r: any) => r.kind === 'total').map(normalize);
@@ -188,6 +198,6 @@ export class AnalyticsService {
       for (const currency of currencies) rows.push(index.get(`${bucket}:${currency}`) as Record<string, unknown> || zero(bucket, currency));
       if (group === 'month') cursor.setUTCMonth(cursor.getUTCMonth() + 1); else cursor.setUTCDate(cursor.getUTCDate() + (group === 'week' ? 7 : 1));
     }
-    return { rows, totals };
+    return { rows, totals, breakdown: detail.map(normalize) };
   }
 }

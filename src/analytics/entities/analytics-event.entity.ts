@@ -12,5 +12,10 @@ export class AnalyticsEventEntity {
   @Column({ type: 'varchar', length: 64 }) page: string;
   @Column({ type: 'varchar', length: 100, nullable: true }) source: string | null;
   @Column({ name: 'engaged_seconds', type: 'int', default: 0 }) engagedSeconds: number;
+  @Column({ name: 'promoter_id', type: 'uuid', nullable: true }) promoterId: string | null;
+  @Column({ name: 'referral_code_id', type: 'uuid', nullable: true }) referralCodeId: string | null;
+  @Column({ type: 'varchar', length: 100, nullable: true }) country: string | null;
+  @Column({ type: 'varchar', length: 100, nullable: true }) state: string | null;
+  @Column({ type: 'varchar', length: 100, nullable: true }) city: string | null;
   @CreateDateColumn({ name: 'received_at', type: 'timestamptz' }) receivedAt: Date;
 }

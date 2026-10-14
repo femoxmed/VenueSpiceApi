@@ -1,3 +1,4 @@
+import { AnalyticsDisputeEntity } from '../analytics/entities/analytics-dispute.entity';
 import {
 	BadRequestException,
 	Injectable,
@@ -546,7 +547,7 @@ export class TicketOrdersService {
 		if (!order) {
 			return { received: true, ignored: true };
 		}
-		if (order.status === 'paid') {
+		if (['paid', 'refunded'].includes(order.status)) {
 			return order;
 		}
 
@@ -554,7 +555,22 @@ export class TicketOrdersService {
 	}
 
 	async handleStripeWebhook(payload: any) {
-		if (payload?.type === 'checkout.session.completed') {
+        const object = payload?.data?.object;
+        if (payload?.type === 'charge.dispute.created' && object?.id && typeof object.payment_intent === 'string' && Number.isSafeInteger(object.amount) && object.amount >= 0) {
+            await this.ticketOrdersRepository.manager.createQueryBuilder().insert().into(AnalyticsDisputeEntity).values({
+                id: object.id, paymentIntentId: object.payment_intent, amountMinor: String(object.amount),
+                currency: String(object.currency).toUpperCase(), occurredAt: new Date(object.created * 1000),
+            }).orIgnore().execute();
+        }
+        if (['payment_intent.payment_failed', 'checkout.session.async_payment_failed', 'checkout.session.expired'].includes(payload?.type)) {
+            const orderId = object?.metadata?.ticketOrderId;
+            if (typeof orderId === 'string' && /^[0-9a-f-]{36}$/i.test(orderId)) {
+                await this.paymentIntentsRepository.createQueryBuilder().update().set({
+                    status: 'failed', providerStatus: payload.type === 'checkout.session.expired' ? 'expired' : 'payment_failed',
+                }).where('idempotency_key = :key AND status != :succeeded', { key: `ticket-order:${orderId}`, succeeded: 'succeeded' }).execute();
+            }
+        }
+		if (['checkout.session.completed', 'checkout.session.async_payment_succeeded'].includes(payload?.type) && ['paid', 'no_payment_required'].includes(payload?.data?.object?.payment_status)) {
 			const paidOrder = await this.markCheckoutSessionPaid(payload.data.object);
 			if ('id' in paidOrder) {
 				await this.markInvoiceAndTransactionPaid(paidOrder, payload.data.object);
@@ -694,6 +710,7 @@ export class TicketOrdersService {
 		params.set('billing_address_collection', stripeTaxEnabled ? 'required' : 'auto');
 		params.set('automatic_tax[enabled]', stripeTaxEnabled ? 'true' : 'false');
 		params.set('metadata[ticketOrderId]', order.id);
+        params.set('payment_intent_data[metadata][ticketOrderId]', order.id);
 			params.set('metadata[eventId]', order.event.id);
 			params.set('metadata[organizationId]', order.organization.id);
 			if (order.organization.stripeAccountId && Number(order.total ?? 0) > 0) {
@@ -1488,7 +1505,7 @@ export class TicketOrdersService {
 		session?: StripeCheckoutSession,
 		providerPayload?: Record<string, unknown>,
 	) {
-		if (order.status === 'paid') {
+		if (['paid', 'refunded'].includes(order.status)) {
 			return order;
 		}
 
