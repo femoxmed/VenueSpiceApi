@@ -4,6 +4,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { LessThanOrEqual, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { EventEntity } from '../events/entities/event.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import {
 	FinancialLedgerEntryEntity,
@@ -39,7 +40,8 @@ export class FinancialLedgerService {
 	async syncOrder(order: TicketOrderEntity) {
 		if (!['paid', 'refunded'].includes(order.status)) return;
 
-		const availableAt = await this.calculateAvailableAt(order);
+		const availability = await this.calculateAvailability(order);
+		const availableAt = availability.availableAt;
 		const status: FinancialLedgerEntryStatus = availableAt.getTime() <= Date.now()
 			? 'available'
 			: 'pending';
@@ -78,6 +80,7 @@ export class FinancialLedgerService {
 					payoutMode,
 					payoutEligible,
 					paidOutAutomaticallyByStripe: !payoutEligible,
+					payoutPolicySnapshot: availability.policySnapshot,
 				},
 			},
 		];
@@ -104,6 +107,65 @@ export class FinancialLedgerService {
 				.andWhere('type = :type', { type: 'organizer_net' })
 				.execute();
 		}
+	}
+
+	async delayPendingOrganizerNetForEventDateChange(
+		event: EventEntity,
+		previousEndDate: Date,
+		nextEndDate: Date,
+		actor?: { id?: string; email?: string; role?: string },
+	) {
+		const previousAnchor = this.toValidDate(previousEndDate);
+		const nextAnchor = this.toValidDate(nextEndDate);
+		if (!previousAnchor || !nextAnchor || nextAnchor.getTime() <= previousAnchor.getTime()) {
+			return { affected: 0 };
+		}
+
+		const holdDays = await this.getHoldDays();
+		const previousAvailableAt = this.addHoldDays(previousAnchor, holdDays);
+		const nextAvailableAt = this.addHoldDays(nextAnchor, holdDays);
+		if (nextAvailableAt.getTime() <= previousAvailableAt.getTime()) {
+			return { affected: 0 };
+		}
+
+		const result = await this.ledgerRepository
+			.createQueryBuilder()
+			.update(FinancialLedgerEntryEntity)
+			.set({
+				status: 'pending',
+				availableAt: nextAvailableAt,
+				metadata: () => `COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
+					'payoutDelayedByEventDateChange', true,
+					'previousEventEndAt', '${previousAnchor.toISOString()}',
+					'nextEventEndAt', '${nextAnchor.toISOString()}',
+					'previousAvailableAt', '${previousAvailableAt.toISOString()}',
+					'nextAvailableAt', '${nextAvailableAt.toISOString()}'
+				)`,
+			})
+			.where('"eventId" = :eventId', { eventId: event.id })
+			.andWhere('type = :type', { type: 'organizer_net' })
+			.andWhere('status = :status', { status: 'pending' })
+			.andWhere('(available_at IS NULL OR available_at < :nextAvailableAt)', { nextAvailableAt })
+			.execute();
+
+		if (result.affected) {
+			await this.auditService.log(
+				'financial_ledger.payout_maturity_delayed',
+				actor,
+				'event',
+				event.id,
+				{
+					affected: result.affected,
+					previousEventEndAt: previousAnchor.toISOString(),
+					nextEventEndAt: nextAnchor.toISOString(),
+					previousAvailableAt: previousAvailableAt.toISOString(),
+					nextAvailableAt: nextAvailableAt.toISOString(),
+				},
+				{ organizationId: event.organization?.id, eventTitle: event.title },
+			);
+		}
+
+		return result;
 	}
 
 	async getOrganizationEntries(organizationId: string) {
@@ -347,6 +409,11 @@ export class FinancialLedgerService {
 		};
 
 		if (existing) {
+			if (type === 'organizer_net') {
+				const adjustedPayload = this.applyOrganizerNetMaturityGuard(existing, payload);
+				Object.assign(existing, adjustedPayload);
+				return this.ledgerRepository.save(existing);
+			}
 			Object.assign(existing, payload);
 			return this.ledgerRepository.save(existing);
 		}
@@ -370,16 +437,47 @@ export class FinancialLedgerService {
 		);
 	}
 
-	private async calculateAvailableAt(order: TicketOrderEntity) {
-		const holdDays = await this.getHoldDays();
-		if (holdDays <= 0) {
-			return new Date(order.paidAt || order.createdAt || new Date());
+	private async calculateAvailability(order: TicketOrderEntity) {
+		const privileged = this.getActiveOrganizationPayoutPolicy(order);
+		if (privileged) {
+			const anchor = privileged.policy === 'after_payment'
+				? this.toValidDate(order.paidAt) || this.toValidDate(order.createdAt) || new Date()
+				: this.toValidDate(order.event?.endsAt) || this.toValidDate(order.event?.startsAt) || this.toValidDate(order.paidAt) || this.toValidDate(order.createdAt) || new Date();
+			const availableAt = this.addHoldDays(anchor, privileged.delayDays);
+			return {
+				availableAt,
+				policySnapshot: {
+					source: 'organization_privilege',
+					policy: privileged.policy,
+					delayDays: privileged.delayDays,
+					startsAt: privileged.startsAt.toISOString(),
+					endsAt: privileged.endsAt.toISOString(),
+					calculatedFrom: privileged.policy === 'after_payment' ? 'payment' : 'event_end',
+					availableAt: availableAt.toISOString(),
+				},
+			};
 		}
+
+		const holdDays = await this.getHoldDays();
+		const availableAt = this.calculateDefaultAvailableAt(order, holdDays);
+		return {
+			availableAt,
+			policySnapshot: {
+				source: 'platform_default',
+				policy: 'after_event',
+				delayDays: holdDays,
+				calculatedFrom: 'event_end',
+				availableAt: availableAt.toISOString(),
+			},
+		};
+	}
+
+	private calculateDefaultAvailableAt(order: TicketOrderEntity, holdDays: number) {
+		if (holdDays <= 0) return new Date(order.paidAt || order.createdAt || new Date());
 		const base = order.event?.endsAt || order.event?.startsAt || order.paidAt || order.createdAt || new Date();
-		const date = new Date(base);
-		if (Number.isNaN(date.getTime())) return new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000);
-		date.setDate(date.getDate() + holdDays);
-		return date;
+		const date = this.toValidDate(base);
+		if (!date) return new Date(Date.now() + holdDays * 24 * 60 * 60 * 1000);
+		return this.addHoldDays(date, holdDays);
 	}
 
 	private async getHoldDays() {
@@ -411,5 +509,61 @@ export class FinancialLedgerService {
 
 	private roundMoney(value: number) {
 		return Math.round((Number(value) || 0) * 100) / 100;
+	}
+
+	private applyOrganizerNetMaturityGuard(
+		existing: FinancialLedgerEntryEntity,
+		payload: Partial<FinancialLedgerEntryEntity>,
+	) {
+		if (existing.status === 'available' || existing.status === 'paid_out' || existing.status === 'reversed') {
+			return {
+				...payload,
+				status: existing.status,
+				availableAt: existing.availableAt,
+				paidOutAt: existing.paidOutAt,
+			};
+		}
+
+		const existingAvailableAt = this.toValidDate(existing.availableAt);
+		const guardedAvailableAt = existingAvailableAt || payload.availableAt;
+		const guardedStatus: FinancialLedgerEntryStatus = guardedAvailableAt && new Date(guardedAvailableAt).getTime() <= Date.now()
+			? 'available'
+			: 'pending';
+
+		return {
+			...payload,
+			status: guardedStatus,
+			availableAt: guardedAvailableAt,
+		};
+	}
+
+	private addHoldDays(date: Date, holdDays: number) {
+		const availableAt = new Date(date);
+		availableAt.setDate(availableAt.getDate() + holdDays);
+		return availableAt;
+	}
+
+	private getActiveOrganizationPayoutPolicy(order: TicketOrderEntity) {
+		const organization = order.organization;
+		const policy = organization?.payoutPolicy || 'platform_default';
+		if (policy === 'platform_default') return null;
+		const startsAt = this.toValidDate(organization.payoutPolicyStartsAt);
+		const endsAt = this.toValidDate(organization.payoutPolicyEndsAt);
+		const paidAt = this.toValidDate(order.paidAt) || this.toValidDate(order.createdAt) || new Date();
+		if (!startsAt || !endsAt || startsAt >= endsAt) return null;
+		if (paidAt < startsAt || paidAt > endsAt) return null;
+		const delayDays = Number(organization.payoutDelayDays ?? 0);
+		return {
+			policy,
+			delayDays: Number.isFinite(delayDays) && delayDays >= 0 ? delayDays : 0,
+			startsAt,
+			endsAt,
+		};
+	}
+
+	private toValidDate(value?: Date | string | null) {
+		if (!value) return null;
+		const date = value instanceof Date ? value : new Date(value);
+		return Number.isFinite(date.getTime()) ? date : null;
 	}
 }

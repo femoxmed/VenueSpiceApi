@@ -7,9 +7,11 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
 import { In, Repository } from 'typeorm';
+import { AuditService } from '../audit/audit.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
 import { UserEntity } from '../auth/entities/user.entity';
+import { Role } from '../common/enums/role.enum';
 import { DiscountCouponEntity } from '../discounts/entities/discount-coupon.entity';
 import { EventEntity } from '../events/entities/event.entity';
 import { EventPrivateAccessTokenEntity } from '../events/entities/event-private-access-token.entity';
@@ -17,6 +19,7 @@ import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceItemEntity } from '../invoices/entities/invoice-item.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
+import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { CheckoutAddOnItemDto, CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
@@ -34,11 +37,20 @@ type StripeCheckoutSession = {
 	amount_subtotal?: number;
 	currency?: string;
 	payment_status?: string;
+	status?: 'open' | 'complete' | 'expired';
 	metadata?: Record<string, string>;
 	total_details?: {
 		amount_discount?: number;
 		amount_shipping?: number;
 		amount_tax?: number;
+	};
+	customer_details?: {
+		address?: Record<string, unknown> | null;
+	};
+	automatic_tax?: {
+		enabled?: boolean;
+		status?: string | null;
+		liability?: Record<string, unknown> | null;
 	};
 };
 
@@ -97,6 +109,8 @@ type PreparedCheckoutDiscount = {
 	value: number;
 	amount: number;
 	influencerCommissionPercent: number;
+	influencerRewardType: 'percentage' | 'fixed';
+	influencerRewardValue: number;
 	influencerCommission: number;
 	stripeCouponId?: string | null;
 };
@@ -128,13 +142,18 @@ export class TicketOrdersService {
 		private readonly paymentIntentsRepository: Repository<PaymentIntentEntity>,
 		@InjectRepository(UserEntity)
 		private readonly usersRepository: Repository<UserEntity>,
+		@InjectRepository(OrganizationMemberEntity)
+		private readonly organizationMembersRepository: Repository<OrganizationMemberEntity>,
 		private readonly configService: ConfigService,
 		private readonly notificationsService: NotificationsService,
 		private readonly platformSettingsService: PlatformSettingsService,
+		private readonly auditService: AuditService,
 	) {}
 
-	findAll() {
+	findAll(query: { status?: string } = {}) {
+		const status = this.normalizeOrderStatus(query.status);
 		return this.ticketOrdersRepository.find({
+			where: status ? { status } : undefined,
 			order: { createdAt: 'DESC' },
 		});
 	}
@@ -225,12 +244,14 @@ export class TicketOrdersService {
 		);
 
 		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
-		const feeEstimate = await this.calculateCheckoutFees(preparedItems, event.organization, discount);
+		const feeEstimate = await this.calculateCheckoutFees(preparedItems, event, discount);
 		const order = await this.ticketOrdersRepository.save(
 			this.ticketOrdersRepository.create({
 				event,
 				organization: event.organization,
 				referralCode,
+				analyticsSessionId: dto.analyticsSessionId || null,
+				analyticsVisitorId: dto.analyticsVisitorId || null,
 				customerName: dto.customerName,
 				customerEmail: dto.customerEmail,
 				customerPhone: dto.customerPhone,
@@ -241,11 +262,18 @@ export class TicketOrdersService {
 				pricingPolicyVersion: '2026-08-04',
 					status: 'pending',
 					subtotal: feeEstimate.subtotal,
-				tax: 0,
+				tax: feeEstimate.tax,
 				platformFee: feeEstimate.platformFee,
 				processingFee: feeEstimate.processingFee,
 				organizerNet: feeEstimate.organizerNet,
 				feePayer: feeEstimate.feePayer,
+				taxProvider: feeEstimate.taxProvider,
+				taxCollectionModeSnapshot: feeEstimate.taxCollectionMode,
+				taxResponsibilitySnapshot: feeEstimate.taxResponsibility,
+				taxRateSnapshot: feeEstimate.taxRate,
+				taxLabelSnapshot: feeEstimate.taxLabel,
+				eventTaxLocationSnapshot: feeEstimate.eventTaxLocation,
+				taxBreakdown: feeEstimate.taxBreakdown,
 				platformFeePercent: feeEstimate.platformFeePercent,
 				platformFeeFixed: feeEstimate.platformFeeFixed,
 				processingFeePercent: feeEstimate.processingFeePercent,
@@ -291,12 +319,11 @@ export class TicketOrdersService {
 	async previewCheckoutFees(dto: PreviewCheckoutFeesDto) {
 		const { event, discount, items } = await this.prepareCheckout(dto);
 		const currency = this.configService.get<string>('TICKETS_CURRENCY', 'USD').toUpperCase();
-		const feeEstimate = await this.calculateCheckoutFees(items, event.organization, discount);
+		const feeEstimate = await this.calculateCheckoutFees(items, event, discount);
 
 		return {
 			eventId: event.id,
 			currency,
-			tax: 0,
 			...feeEstimate,
 		};
 	}
@@ -537,6 +564,110 @@ export class TicketOrdersService {
 		return { received: true };
 	}
 
+	async reconcilePendingStripeOrders(user: UserEntity) {
+		const orders = await this.ticketOrdersRepository
+			.createQueryBuilder('order')
+			.where('order.status = :status', { status: 'pending' })
+			.andWhere('order.stripeCheckoutSessionId IS NOT NULL')
+			.andWhere('order.stripeCheckoutSessionId LIKE :prefix', { prefix: 'cs_%' })
+			.orderBy('order.createdAt', 'ASC')
+			.getMany();
+
+		const results: Array<{
+			orderId: string;
+			sessionId: string;
+			customerName: string;
+			eventTitle: string;
+			amount: number;
+			currency: string;
+			outcome: 'paid' | 'cancelled' | 'pending' | 'failed';
+			reason: string;
+		}> = [];
+
+		for (const order of orders) {
+			const sessionId = order.stripeCheckoutSessionId as string;
+			const resultContext = {
+				orderId: order.id,
+				sessionId,
+				customerName: order.customerName,
+				eventTitle: order.event?.title ?? 'Ticket order',
+				amount: Number(order.total ?? 0),
+				currency: order.currency,
+			};
+			try {
+				const session = await this.retrieveStripeSession(sessionId);
+				if (session.metadata?.ticketOrderId && session.metadata.ticketOrderId !== order.id) {
+					throw new BadRequestException('Stripe session belongs to a different ticket order');
+				}
+
+				if (session.payment_status === 'paid') {
+					const paidOrder = await this.markCheckoutSessionPaid(session);
+					if (!('id' in paidOrder)) {
+						throw new BadRequestException('Ticket order could not be reconciled');
+					}
+					const payment = await this.markInvoiceAndTransactionPaid(paidOrder, session);
+					const reconciliation = {
+						recoveredFromPending: true,
+						reconciledAt: new Date().toISOString(),
+						reconciledByUserId: user.id,
+						reconciledByEmail: user.email,
+						previousStatus: 'pending',
+					};
+					paidOrder.providerPayload = {
+						...(paidOrder.providerPayload ?? {}),
+						reconciliation,
+					};
+					payment.transaction.providerPayload = {
+						...(payment.transaction.providerPayload ?? {}),
+						reconciliation,
+					};
+					await Promise.all([
+						this.ticketOrdersRepository.save(paidOrder),
+						this.paymentIntentsRepository.save(payment.transaction),
+					]);
+					results.push({ ...resultContext, outcome: 'paid', reason: 'Recovered: Stripe reports the payment as paid' });
+				} else if (session.status === 'expired') {
+					order.status = 'cancelled';
+					order.providerPayload = session as unknown as Record<string, unknown>;
+					await this.ticketOrdersRepository.save(order);
+					const transaction = await this.paymentIntentsRepository.findOne({
+						where: { idempotencyKey: `ticket-order:${order.id}` },
+					});
+					if (transaction && transaction.status !== 'succeeded') {
+						transaction.status = 'failed';
+						transaction.providerStatus = 'expired';
+						transaction.providerPayload = session as unknown as Record<string, unknown>;
+						await this.paymentIntentsRepository.save(transaction);
+						if (transaction.invoice && transaction.invoice.status !== 'paid') {
+							transaction.invoice.status = 'cancelled';
+							await this.invoicesRepository.save(transaction.invoice);
+						}
+					}
+					results.push({ ...resultContext, outcome: 'cancelled', reason: 'Stripe Checkout Session expired unpaid' });
+				} else {
+					results.push({ ...resultContext, outcome: 'pending', reason: `Stripe session is ${session.status ?? 'open'} and payment is ${session.payment_status ?? 'unpaid'}` });
+				}
+			} catch (error) {
+				results.push({
+					...resultContext,
+					outcome: 'failed',
+					reason: error instanceof Error ? error.message : 'Unable to reconcile Stripe payment',
+				});
+			}
+		}
+
+		const summary = {
+			scanned: orders.length,
+			paid: results.filter((result) => result.outcome === 'paid').length,
+			cancelled: results.filter((result) => result.outcome === 'cancelled').length,
+			pending: results.filter((result) => result.outcome === 'pending').length,
+			failed: results.filter((result) => result.outcome === 'failed').length,
+			results,
+		};
+		await this.auditService.log('ticket_orders.stripe_reconciled', user, 'ticket_order', undefined, summary);
+		return summary;
+	}
+
 	private async createStripeSession(order: TicketOrderEntity, privateAccessToken?: string): Promise<StripeCheckoutSession> {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
 		const appUrl = this.configService.get<string>('WEB_APP_URL', 'http://localhost:3000');
@@ -551,6 +682,8 @@ export class TicketOrdersService {
 
 		const params = new URLSearchParams();
 		const settings = await this.platformSettingsService.getPricingSettings();
+		const taxProvider = this.feeSnapshotString(order, 'taxProvider') || order.taxProvider || 'none';
+		const stripeTaxEnabled = taxProvider === 'stripe' && settings.stripeAutomaticTaxEnabled;
 		params.set('mode', 'payment');
 		const privateAccessQuery = order.event.visibility === 'private' && privateAccessToken?.trim()
 			? `&access=${encodeURIComponent(privateAccessToken.trim())}`
@@ -558,8 +691,8 @@ export class TicketOrdersService {
 		params.set('success_url', `${appUrl}/events/${order.event.slug}/payment/success?order=${order.id}&session_id={CHECKOUT_SESSION_ID}`);
 		params.set('cancel_url', `${appUrl}/events/${order.event.slug}/purchase?checkout=cancelled${privateAccessQuery}`);
 		params.set('customer_email', order.customerEmail);
-		params.set('billing_address_collection', 'required');
-		params.set('automatic_tax[enabled]', settings.stripeAutomaticTaxEnabled ? 'true' : 'false');
+		params.set('billing_address_collection', stripeTaxEnabled ? 'required' : 'auto');
+		params.set('automatic_tax[enabled]', stripeTaxEnabled ? 'true' : 'false');
 		params.set('metadata[ticketOrderId]', order.id);
 			params.set('metadata[eventId]', order.event.id);
 			params.set('metadata[organizationId]', order.organization.id);
@@ -630,6 +763,11 @@ export class TicketOrdersService {
 		}
 		if (buyerProcessingFee > 0) {
 			this.appendStripeLineItem(params, lineItemIndex, order.currency, 'Payment processing fee', buyerProcessingFee, settings);
+			lineItemIndex += 1;
+		}
+		const organizerManualTax = this.feeSnapshotNumber(order, 'organizerManualTax', 0);
+		if (organizerManualTax > 0) {
+			this.appendStripeLineItem(params, lineItemIndex, order.currency, this.feeSnapshotString(order, 'taxLabel') || 'Tax', organizerManualTax, settings);
 		}
 
 		const response = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -687,11 +825,13 @@ export class TicketOrdersService {
 
 	private async calculateCheckoutFees(
 		items: PreparedCheckoutItem[],
-		organization: OrganizationEntity,
+		event: EventEntity,
 		discount?: PreparedCheckoutDiscount | null,
 	) {
+		const organization = event.organization;
 		const settings = await this.platformSettingsService.getPricingSettings();
 		const organizerDeal = this.getActiveOrganizerDeal(organization);
+		const taxSettings = this.resolveOrderTaxSettings(event, settings);
 		const venueSpiceFeePercent = organizerDeal?.venueSpiceFeePercent ?? settings.venueSpiceFeePercent;
 		const venueSpiceFeeFixed = organizerDeal?.venueSpiceFeeFixed ?? settings.venueSpiceFeeFixed;
 		const grossSubtotal = this.roundMoney(items.reduce((sum, item) => sum + Number(item.lineTotal), 0));
@@ -730,11 +870,12 @@ export class TicketOrdersService {
 			: 0;
 		const platformFee = paidSubtotal ? this.roundMoney(buyerPlatformFee + organizerPlatformFee) : 0;
 		const processingFee = paidSubtotal ? this.roundMoney(buyerProcessingFee + organizerProcessingFee) : 0;
-		const total = this.roundMoney(subtotal + buyerPlatformFee + buyerProcessingFee);
-		const influencerCommission = discount
-			? this.roundMoney(subtotal * (discount.influencerCommissionPercent / 100))
+		const organizerManualTax = taxSettings.taxProvider === 'organizer'
+			? this.roundMoney(subtotal * (taxSettings.taxRate / 100))
 			: 0;
-		const organizerNet = this.roundMoney(subtotal - organizerPlatformFee - organizerProcessingFee - influencerCommission);
+		const total = this.roundMoney(subtotal + buyerPlatformFee + buyerProcessingFee + organizerManualTax);
+		const influencerCommission = this.calculateInfluencerCommission(discount, subtotal);
+		const organizerNet = this.roundMoney(subtotal - organizerPlatformFee - organizerProcessingFee - influencerCommission + organizerManualTax);
 		if ((feePayer === 'organizer' || feePayer === 'mixed') && organizerNet < 0) {
 			throw new BadRequestException(
 				'Ticket price is too low for the organizer to absorb fees, discounts, and influencer commission. Increase the ticket price or pass fees to buyers.',
@@ -745,13 +886,24 @@ export class TicketOrdersService {
 			feePayer,
 			ticketCount,
 			grossSubtotal,
-			taxLiability: 'buyer',
-			taxIncludedInOrganizerNet: false,
+			tax: organizerManualTax,
+			taxProvider: taxSettings.taxProvider,
+			taxCollectionMode: taxSettings.taxCollectionMode,
+			taxResponsibility: taxSettings.taxResponsibility,
+			taxRate: taxSettings.taxRate,
+			taxLabel: taxSettings.taxLabel,
+			organizerManualTax,
+			stripeTaxExpected: taxSettings.taxProvider === 'stripe',
+			taxIncludedInOrganizerNet: taxSettings.taxProvider === 'organizer',
+			eventTaxLocation: taxSettings.eventTaxLocation,
+			taxBreakdown: taxSettings.taxBreakdown,
 			discountCode: discount?.code ?? null,
 			discountType: discount?.type ?? null,
 			discountValue: discount?.value ?? 0,
 			discountAmount,
 			influencerCommissionPercent: discount?.influencerCommissionPercent ?? 0,
+			influencerRewardType: discount?.influencerRewardType ?? 'percentage',
+			influencerRewardValue: discount?.influencerRewardValue ?? discount?.influencerCommissionPercent ?? 0,
 			influencerCommission,
 			subtotal,
 			platformFee,
@@ -811,10 +963,92 @@ export class TicketOrdersService {
 		};
 	}
 
+	private resolveOrderTaxSettings(
+		event: EventEntity,
+		settings: Awaited<ReturnType<PlatformSettingsService['getPricingSettings']>>,
+	) {
+		const taxCollectionMode = event.taxCollectionMode || 'none';
+		const taxResponsibility = event.taxResponsibility || 'organizer';
+		const eventTaxLocation = {
+			country: event.country ?? null,
+			state: event.state ?? null,
+			city: event.city ?? null,
+			streetAddress: event.streetAddress ?? null,
+			venuePostalCode: event.venuePostalCode ?? null,
+			timezone: event.timezone ?? null,
+			isVirtual: Boolean(event.isVirtual),
+			venueAddressTaxConfirmed: Boolean(event.venueAddressTaxConfirmed),
+			venueAddressTaxConfirmedAt: event.venueAddressTaxConfirmedAt?.toISOString?.() ?? null,
+			venueAddressTaxConsentText: event.venueAddressTaxConsentText ?? null,
+		};
+
+		if (taxCollectionMode === 'stripe_tax' && taxResponsibility === 'venue_spice' && settings.stripeAutomaticTaxEnabled) {
+			return {
+				taxProvider: 'stripe' as const,
+				taxCollectionMode,
+				taxResponsibility,
+				taxRate: 0,
+				taxLabel: 'Sales tax',
+				eventTaxLocation,
+				taxBreakdown: {
+					provider: 'stripe',
+					mode: taxCollectionMode,
+					responsibility: taxResponsibility,
+					taxCode: event.taxCode || settings.stripeTaxCode || null,
+					venueAddressTaxConfirmed: Boolean(event.venueAddressTaxConfirmed),
+					venueAddressTaxConfirmedAt: event.venueAddressTaxConfirmedAt?.toISOString?.() ?? null,
+					venueAddressTaxConsentText: event.venueAddressTaxConsentText ?? null,
+					note: 'Stripe Tax calculates the final tax amount during Checkout.',
+				},
+			};
+		}
+
+		if (taxCollectionMode === 'organizer_manual' && event.organizerTaxPermitConfirmed) {
+			const taxRate = Math.max(0, Number(event.organizerTaxRate || 0));
+			return {
+				taxProvider: taxRate > 0 ? 'organizer' as const : 'none' as const,
+				taxCollectionMode,
+				taxResponsibility: 'organizer' as const,
+				taxRate,
+				taxLabel: event.organizerTaxLabel || 'Tax',
+				eventTaxLocation,
+				taxBreakdown: {
+					provider: taxRate > 0 ? 'organizer' : 'none',
+					mode: taxCollectionMode,
+					responsibility: 'organizer',
+					rate: taxRate,
+					label: event.organizerTaxLabel || 'Tax',
+					organizerTaxPermitConfirmed: true,
+					organizerTaxConsentAt: event.organizerTaxConsentAt?.toISOString?.() ?? null,
+					organizerTaxConsentText: event.organizerTaxConsentText ?? null,
+				},
+			};
+		}
+
+		return {
+			taxProvider: 'none' as const,
+			taxCollectionMode: 'none' as const,
+			taxResponsibility: 'organizer' as const,
+			taxRate: 0,
+			taxLabel: 'Tax',
+			eventTaxLocation,
+			taxBreakdown: {
+				provider: 'none',
+				mode: 'none',
+				responsibility: 'organizer',
+			},
+		};
+	}
+
 	private feeSnapshotNumber(order: TicketOrderEntity, key: string, fallback: number) {
 		const value = order.feeSnapshot?.[key];
 		const numeric = Number(value);
 		return Number.isFinite(numeric) ? numeric : fallback;
+	}
+
+	private feeSnapshotString(order: TicketOrderEntity, key: string) {
+		const value = order.feeSnapshot?.[key];
+		return typeof value === 'string' ? value : '';
 	}
 
 	private getOrderAddOns(order: TicketOrderEntity): PreparedCheckoutAddOn[] {
@@ -854,6 +1088,8 @@ export class TicketOrdersService {
 			value: Number(discount.value ?? 0),
 			amount,
 			influencerCommissionPercent: Number(discount.influencerCommissionPercent ?? 0),
+			influencerRewardType: discount.influencerRewardType === 'fixed' ? 'fixed' : 'percentage',
+			influencerRewardValue: Number(discount.influencerRewardValue ?? discount.influencerCommissionPercent ?? 0),
 			influencerCommission: Number(discount.influencerCommission ?? 0),
 			stripeCouponId: typeof discount.stripeCouponId === 'string' ? discount.stripeCouponId : null,
 		};
@@ -868,6 +1104,8 @@ export class TicketOrdersService {
 			value: discount.value,
 			amount: discount.amount,
 			influencerCommissionPercent: discount.influencerCommissionPercent,
+			influencerRewardType: discount.influencerRewardType,
+			influencerRewardValue: discount.influencerRewardValue,
 			influencerCommission,
 		};
 	}
@@ -885,8 +1123,18 @@ export class TicketOrdersService {
 			value: couponValue,
 			amount,
 			influencerCommissionPercent: Math.max(0, Number(coupon.influencerCommissionPercent || 0)),
+			influencerRewardType: coupon.influencerRewardType || 'percentage',
+			influencerRewardValue: Math.max(0, Number(coupon.influencerRewardValue || coupon.influencerCommissionPercent || 0)),
 			influencerCommission: 0,
 		};
+	}
+
+	private calculateInfluencerCommission(discount: PreparedCheckoutDiscount | null | undefined, subtotal: number) {
+		if (!discount) return 0;
+		if (discount.influencerRewardType === 'fixed') {
+			return this.roundMoney(Math.min(Math.max(0, discount.influencerRewardValue), subtotal));
+		}
+		return this.roundMoney(subtotal * (discount.influencerCommissionPercent / 100));
 	}
 
 	private normalizeEventAddOns(event: EventEntity) {
@@ -944,6 +1192,15 @@ export class TicketOrdersService {
 		return Math.round((Number(value) || 0) * 100) / 100;
 	}
 
+	private normalizeOrderStatus(status?: string): TicketOrderEntity['status'] | undefined {
+		const normalized = String(status || '').trim().toLowerCase();
+		if (!normalized || normalized === 'all') return undefined;
+		if (['pending', 'paid', 'cancelled', 'refunded'].includes(normalized)) {
+			return normalized as TicketOrderEntity['status'];
+		}
+		return undefined;
+	}
+
 	private appendStripeLineItem(
 		params: URLSearchParams,
 		index: number,
@@ -979,11 +1236,21 @@ export class TicketOrdersService {
 	}
 
 	private applyStripeTotals(order: TicketOrderEntity, session: StripeCheckoutSession) {
-		if (typeof session.total_details?.amount_tax === 'number') {
+		const taxProvider = this.feeSnapshotString(order, 'taxProvider') || order.taxProvider || 'none';
+		if (taxProvider === 'stripe' && typeof session.total_details?.amount_tax === 'number') {
 			order.tax = this.roundMoney(session.total_details.amount_tax / 100);
+			order.taxBreakdown = {
+				...(order.taxBreakdown ?? {}),
+				provider: 'stripe',
+				stripeAutomaticTax: session.automatic_tax ?? null,
+				stripeTotalDetails: session.total_details ?? null,
+			};
 		}
 		if (typeof session.amount_total === 'number') {
 			order.total = this.roundMoney(session.amount_total / 100);
+		}
+		if (session.customer_details?.address) {
+			order.buyerBillingAddressSnapshot = session.customer_details.address;
 		}
 		this.updateFeeSnapshot(order, {
 			stripeAmountSubtotal: typeof session.amount_subtotal === 'number'
@@ -994,8 +1261,10 @@ export class TicketOrdersService {
 				: this.feeSnapshotNumber(order, 'stripeAmountDiscount', this.feeSnapshotNumber(order, 'discountAmount', 0)),
 			stripeTaxAmount: Number(order.tax ?? 0),
 			stripeAmountTotal: Number(order.total ?? 0),
-			taxLiability: 'buyer',
-			taxIncludedInOrganizerNet: false,
+			taxProvider,
+			taxLiability: taxProvider === 'stripe' ? 'venue_spice' : this.feeSnapshotString(order, 'taxResponsibility') || 'organizer',
+			taxIncludedInOrganizerNet: taxProvider === 'organizer',
+			buyerBillingAddress: order.buyerBillingAddressSnapshot ?? null,
 		});
 	}
 
@@ -1254,7 +1523,144 @@ export class TicketOrdersService {
 		order.tickets = await this.issueTickets(order);
 		const savedOrder = await this.ticketOrdersRepository.save(order);
 		await this.queueTicketDeliveryEmails(savedOrder).catch(() => undefined);
+		await this.queueOrderPaidNotifications(savedOrder).catch(() => undefined);
 		return savedOrder;
+	}
+
+	private async queueOrderPaidNotifications(order: TicketOrderEntity) {
+		const [organizerRecipients, adminRecipients] = await Promise.all([
+			this.getOrganizerNotificationRecipients(order.organization),
+			this.getAdminNotificationRecipients(),
+		]);
+		const appUrl = this.configService.get<string>('FRONTEND_URL', 'https://venuespice.com').replace(/\/+$/, '');
+		const adminUrl = this.configService.get<string>('ADMIN_URL', 'https://admin.venuespice.com').replace(/\/+$/, '');
+		const ticketQuantity = (order.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+		const issuedTicketCount = (order.tickets || []).length;
+		const addOnSummary = this.getOrderAddOns(order);
+		const discount = this.getOrderDiscount(order);
+		const rows = [
+			{ label: 'Event', value: order.event?.title || 'Venue Spice event' },
+			{ label: 'Buyer', value: `${order.customerName} (${order.customerEmail})` },
+			{ label: 'Ticket quantity', value: ticketQuantity },
+			{ label: 'Issued tickets', value: issuedTicketCount },
+			{ label: 'Add-ons', value: addOnSummary.length ? addOnSummary.map((item) => `${item.quantity} x ${item.name}`).join(', ') : 'None' },
+			{ label: 'Subtotal', value: this.formatMoney(Number(order.subtotal || 0), order.currency) },
+			{ label: 'Tax', value: this.formatMoney(Number(order.tax || 0), order.currency) },
+			{ label: 'Total paid', value: this.formatMoney(Number(order.total || 0), order.currency) },
+			{ label: 'Venue Spice fee', value: this.formatMoney(Number(order.platformFee || 0), order.currency) },
+			{ label: 'Organizer net', value: this.formatMoney(Number(order.organizerNet || 0), order.currency) },
+			...(discount ? [{ label: 'Discount', value: `${discount.code} (${this.formatMoney(discount.amount, order.currency)})` }] : []),
+			{ label: 'Order ID', value: order.id },
+		];
+		const eventDashboardUrl = `${appUrl}/dashboard/sales?order=${encodeURIComponent(order.id)}`;
+		const adminOrderUrl = `${adminUrl}/ticket-orders`;
+
+		await Promise.allSettled([
+			...organizerRecipients.map((recipient) =>
+				this.notificationsService.queueEmail(
+					recipient.email,
+					`New ticket order paid: ${order.event?.title || 'Venue Spice event'}`,
+					this.notificationsService.buildBrandedEmail({
+						eyebrow: 'New paid order',
+						title: 'A buyer just paid for your event',
+						greeting: `Hello ${recipient.name || order.organization?.name || 'there'},`,
+						intro: `${order.customerName} completed an order for ${order.event?.title || 'your event'}.`,
+						rows,
+						action: { label: 'View Sales', url: eventDashboardUrl },
+						note: 'Pending orders are not counted here. This notification is sent only after the order is marked paid.',
+					}),
+				),
+			),
+			...adminRecipients.map((recipient) =>
+				this.notificationsService.queueEmail(
+					recipient.email,
+					`Venue Spice order paid: ${order.event?.title || 'Event'}`,
+					this.notificationsService.buildBrandedEmail({
+						eyebrow: 'Platform sale',
+						title: 'A ticket order was paid',
+						greeting: `Hello ${recipient.name || 'there'},`,
+						intro: `${order.customerName} completed a ticket order on Venue Spice.`,
+						rows,
+						action: { label: 'Open Admin', url: adminOrderUrl },
+					}),
+				),
+			),
+			...organizerRecipients
+				.filter((recipient) => recipient.userId)
+				.map((recipient) =>
+					this.notificationsService.createInAppNotification({
+						userId: recipient.userId!,
+						type: 'ticket_order_paid',
+						title: 'New ticket order paid',
+						message: `${order.customerName} paid ${this.formatMoney(Number(order.total || 0), order.currency)} for ${order.event?.title || 'your event'}.`,
+						actionUrl: `/dashboard/sales?order=${order.id}`,
+						metadata: { orderId: order.id, eventId: order.event?.id, organizationId: order.organization?.id },
+					}),
+				),
+			...adminRecipients.map((recipient) =>
+				this.notificationsService.createInAppNotification({
+					userId: recipient.userId,
+					type: 'ticket_order_paid',
+					title: 'Ticket order paid',
+					message: `${order.customerName} paid ${this.formatMoney(Number(order.total || 0), order.currency)} for ${order.event?.title || 'an event'}.`,
+					actionUrl: '/ticket-orders',
+					metadata: { orderId: order.id, eventId: order.event?.id, organizationId: order.organization?.id },
+				}),
+			),
+		]);
+	}
+
+	private async getOrganizerNotificationRecipients(organization?: OrganizationEntity | null) {
+		const recipients = new Map<string, { email: string; name: string; userId?: string }>();
+		if (!organization) return [];
+		if (organization.ownerUserId) {
+			const owner = await this.usersRepository.findOne({ where: { id: organization.ownerUserId, isActive: true } });
+			if (owner?.email) {
+				recipients.set(owner.email.toLowerCase(), {
+					email: owner.email,
+					name: owner.fullName || organization.name,
+					userId: owner.id,
+				});
+			}
+		}
+		const members = await this.organizationMembersRepository.find({
+			where: { organizationId: organization.id, status: 'active' },
+		});
+		members.forEach((member) => {
+			if (!member.user?.email) return;
+			recipients.set(member.user.email.toLowerCase(), {
+				email: member.user.email,
+				name: member.user.fullName || organization.name,
+				userId: member.user.id,
+			});
+		});
+		[organization.businessEmail, organization.contactEmail].forEach((email) => {
+			const normalized = email?.trim().toLowerCase();
+			if (!normalized || recipients.has(normalized)) return;
+			recipients.set(normalized, { email: email!.trim(), name: organization.name });
+		});
+		return Array.from(recipients.values());
+	}
+
+	private async getAdminNotificationRecipients() {
+		const admins = await this.usersRepository.find({
+			where: { role: In([Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN]), isActive: true },
+		});
+		return admins
+			.filter((admin) => Boolean(admin.email))
+			.map((admin) => ({
+				email: admin.email,
+				name: admin.fullName,
+				userId: admin.id,
+			}));
+	}
+
+	private formatMoney(value: number, currency = 'USD') {
+		return new Intl.NumberFormat('en-US', {
+			style: 'currency',
+			currency: (currency || 'USD').toUpperCase(),
+			minimumFractionDigits: 2,
+		}).format(Number(value || 0));
 	}
 
 	private async createDemoInvoiceAndTransaction(order: TicketOrderEntity) {

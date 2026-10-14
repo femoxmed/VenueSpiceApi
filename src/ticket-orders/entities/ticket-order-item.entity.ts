@@ -1,8 +1,9 @@
-import { Column, Entity, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import { Index, Column, Entity, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
 import { TicketTypeEntity } from '../../events/entities/ticket-type.entity';
 import { TicketOrderEntity } from './ticket-order.entity';
 
 @Entity('ticket_order_items')
+@Index('analytics_items_order_idx', ['order'])
 export class TicketOrderItemEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;

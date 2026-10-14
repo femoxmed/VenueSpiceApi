@@ -55,6 +55,14 @@ export class EventsController {
 	@ApiBearerAuth()
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
+	@Post(':id/clone')
+	clone(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
+		return this.eventsService.clone(id, req.user, req as any);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF, Role.USER)
 	@Get(':id')
 	findOne(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
 		return this.eventsService.findOne(id, req.user);

@@ -1,3 +1,5 @@
+import { AnalyticsModule } from './analytics/analytics.module';
+import { AnalyticsEventEntity } from './analytics/entities/analytics-event.entity';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -121,6 +123,7 @@ function getBullQueuePrefix(value?: string | null) {
 					configService.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
 				autoLoadEntities: false,
 				entities: [
+					AnalyticsEventEntity,
 					UserEntity,
 					PasswordResetRecordEntity,
 					NewsletterSubscriberEntity,
@@ -186,6 +189,7 @@ function getBullQueuePrefix(value?: string | null) {
 				},
 			}),
 		}),
+		AnalyticsModule,
 		AuthModule,
 		DatabaseModule,
 

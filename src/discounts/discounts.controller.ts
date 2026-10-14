@@ -5,7 +5,7 @@ import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateDiscountCouponDto } from './dto/create-discount-coupon.dto';
-import { UpdateDiscountCouponDto, UpdateDiscountCouponStatusDto } from './dto/update-discount-coupon.dto';
+import { DeclineDiscountCouponDto, UpdateDiscountCouponDto, UpdateDiscountCouponStatusDto } from './dto/update-discount-coupon.dto';
 import { DiscountsService } from './discounts.service';
 
 @ApiTags('Discounts')
@@ -38,6 +38,21 @@ export class DiscountsController {
 	@Get('influencer/earnings')
 	findInfluencerEarnings(@Req() req: { user: { id: string; role: Role } }) {
 		return this.discountsService.findInfluencerEarnings(req.user);
+	}
+
+	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Get('influencer/withdrawal-requests')
+	listInfluencerWithdrawalRequests(@Req() req: { user: { id: string; role: Role } }) {
+		return this.discountsService.listInfluencerWithdrawalRequests(req.user);
+	}
+
+	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Post('influencer/withdrawal-requests')
+	requestInfluencerWithdrawal(
+		@Body() body: { note?: string },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.discountsService.requestInfluencerWithdrawal(req.user, body);
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)
@@ -74,8 +89,12 @@ export class DiscountsController {
 
 	@Roles(Role.USER, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
 	@Post(':id/decline')
-	decline(@Param('id') id: string, @Req() req: { user: { id: string; role: Role } }) {
-		return this.discountsService.decline(id, req.user);
+	decline(
+		@Param('id') id: string,
+		@Body() body: DeclineDiscountCouponDto,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.discountsService.decline(id, req.user, body.reason);
 	}
 
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.USER)

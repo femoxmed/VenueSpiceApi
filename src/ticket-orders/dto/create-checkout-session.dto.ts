@@ -1,5 +1,6 @@
 import {
 	IsArray,
+	IsUUID,
 	IsBoolean,
 	IsEmail,
 	IsInt,
@@ -44,6 +45,9 @@ export class CheckoutAddOnItemDto {
 }
 
 export class CreateCheckoutSessionDto {
+	@IsOptional() @IsUUID() analyticsSessionId?: string;
+	@IsOptional() @IsUUID() analyticsVisitorId?: string;
+
 	@IsString()
 	eventId: string;
 

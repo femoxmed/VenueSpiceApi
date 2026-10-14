@@ -1,6 +1,6 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Brackets, Repository } from 'typeorm';
+import { Brackets, In, Repository } from 'typeorm';
 import { AgentEntity } from '../agents/entities/agent.entity';
 import { UserEntity } from '../auth/entities/user.entity';
 import { EventEntity } from '../events/entities/event.entity';
@@ -13,6 +13,7 @@ import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity
 import { ConfigService } from '@nestjs/config';
 import { ReferralCodeEntity } from '../agents/entities/referral-code.entity';
 import { NotificationsService } from '../notifications/notifications.service';
+import { WithdrawalRequestEntity } from '../organizer-sales/entities/withdrawal-request.entity';
 
 type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string; status?: string };
 
@@ -33,6 +34,8 @@ export class DiscountsService {
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
 		@InjectRepository(ReferralCodeEntity)
 		private readonly referralCodesRepository: Repository<ReferralCodeEntity>,
+		@InjectRepository(WithdrawalRequestEntity)
+		private readonly withdrawalRequestsRepository: Repository<WithdrawalRequestEntity>,
 		private readonly configService: ConfigService,
 		private readonly notificationsService: NotificationsService,
 	) {}
@@ -106,6 +109,11 @@ export class DiscountsService {
 		const code = dto.code.trim().toUpperCase();
 		const existing = await this.couponsRepository.findOne({ where: { code } });
 		if (existing) throw new BadRequestException('Discount code already exists');
+		const influencerRewardType = dto.influencerRewardType || 'percentage';
+		const influencerRewardValue = dto.influencerRewardValue ?? dto.influencerCommissionPercent ?? 0;
+		if (influencerRewardType === 'percentage' && influencerRewardValue > 100) {
+			throw new BadRequestException('Influencer percentage reward cannot be above 100%.');
+		}
 
 		const event = dto.eventId
 			? await this.eventsRepository.findOne({ where: { id: dto.eventId } })
@@ -134,7 +142,9 @@ export class DiscountsService {
 				code,
 				type: dto.type,
 				value: dto.value,
-				influencerCommissionPercent: dto.influencerCommissionPercent,
+				influencerCommissionPercent: influencerRewardType === 'percentage' ? influencerRewardValue : 0,
+				influencerRewardType,
+				influencerRewardValue,
 				startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
 				endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
 				maxUses: dto.maxUses ?? null,
@@ -146,18 +156,19 @@ export class DiscountsService {
 	}
 
 	async findInfluencerCampaigns(user: { id: string; role: Role }) {
-		const agent = await this.findAgentForInfluencerUser(user.id);
-		if (!agent) return [];
+		const agents = await this.findAgentsForInfluencerUser(user.id);
+		if (!agents.length) return [];
 
 		return this.couponsRepository.find({
-			where: { agent: { id: agent.id } },
+			where: { agent: { id: In(agents.map((agent) => agent.id)) } },
 			order: { createdAt: 'DESC' },
 		});
 	}
 
 	async findInfluencerEarnings(user: { id: string; role: Role }) {
-		const agent = await this.findAgentForInfluencerUser(user.id);
-		if (!agent) {
+		const agents = await this.findAgentsForInfluencerUser(user.id);
+		const payoutOrganization = await this.findInfluencerOrganization(user.id);
+		if (!agents.length) {
 			return {
 				summary: {
 					totalRevenue: 0,
@@ -166,24 +177,25 @@ export class DiscountsService {
 					available: 0,
 					withdrawn: 0,
 					holdDays: this.getInfluencerHoldDays(),
-					stripeConnected: false,
+					stripeConnected: this.isStripeReady(payoutOrganization),
 					canWithdraw: false,
 				},
 				rows: [],
 			};
 		}
 
+		const agentIds = agents.map((agent) => agent.id);
 		const orders = await this.ticketOrdersRepository.find({
 			where: {
 				referralCode: {
-					agent: { id: agent.id },
+					agent: { id: In(agentIds) },
 				},
 				status: 'paid',
 			},
 			order: { paidAt: 'DESC', createdAt: 'DESC' },
 		});
 		const coupons = await this.couponsRepository.find({
-			where: { agent: { id: agent.id } },
+			where: { agent: { id: In(agentIds) } },
 		});
 		const couponByCode = new Map(coupons.map((coupon) => [coupon.code.toUpperCase(), coupon]));
 		const rows = orders.flatMap((order) => {
@@ -224,6 +236,22 @@ export class DiscountsService {
 			});
 		});
 
+		const requests = await this.findInfluencerWithdrawalRequests(user.id);
+		const claimedSourceIds = new Set(
+			requests
+				.filter((request) => ['pending_review', 'approved', 'processing', 'paid', 'failed'].includes(request.status))
+				.flatMap((request) => request.sourceEntryIds ?? []),
+		);
+		const paidSourceIds = new Set(
+			requests
+				.filter((request) => request.status === 'paid')
+				.flatMap((request) => request.sourceEntryIds ?? []),
+		);
+		for (const row of rows) {
+			if (paidSourceIds.has(row.id)) row.status = 'withdrawn';
+			else if (claimedSourceIds.has(row.id)) row.status = 'processing';
+		}
+
 		const totalRevenue = rows.reduce((sum, row) => sum + row.totalCost, 0);
 		const totalCommission = rows.reduce((sum, row) => sum + row.commission, 0);
 		const pending = rows
@@ -232,21 +260,69 @@ export class DiscountsService {
 		const available = rows
 			.filter((row) => row.status === 'available')
 			.reduce((sum, row) => sum + row.commission, 0);
+		const withdrawn = requests
+			.filter((request) => request.status === 'paid')
+			.reduce((sum, request) => sum + Number(request.amount || 0), 0);
 
 		return {
-			influencer: agent,
+			influencer: agents[0],
 			summary: {
 				totalRevenue,
 				totalCommission,
 				pending,
 				available,
-				withdrawn: 0,
+				withdrawn: this.roundMoney(withdrawn),
 				holdDays: this.getInfluencerHoldDays(),
-				stripeConnected: false,
+				stripeConnected: this.isStripeReady(payoutOrganization),
 				canWithdraw: available > 0,
 			},
 			rows,
 		};
+	}
+
+	async listInfluencerWithdrawalRequests(user: { id: string; role: Role }) {
+		await this.ensureInfluencerUser(user.id);
+		return this.findInfluencerWithdrawalRequests(user.id);
+	}
+
+	async requestInfluencerWithdrawal(user: { id: string; email?: string; role: Role }, payload?: { note?: string }) {
+		await this.ensureInfluencerUser(user.id);
+		const organization = await this.findInfluencerOrganization(user.id);
+		if (!organization) throw new BadRequestException('Influencer payout profile was not found.');
+		if (!organization.stripeAccountId) {
+			throw new BadRequestException('Connect Stripe before requesting a withdrawal.');
+		}
+		if (!this.isStripeReady(organization)) {
+			throw new BadRequestException('Finish Stripe payout setup before requesting a withdrawal.');
+		}
+		const earnings = await this.findInfluencerEarnings(user);
+		const availableRows = earnings.rows.filter((row) => row.status === 'available');
+		const amount = this.roundMoney(availableRows.reduce((sum, row) => sum + row.commission, 0));
+		if (!availableRows.length || amount <= 0) {
+			throw new BadRequestException('No available influencer earnings to request yet.');
+		}
+		const currency = availableRows[0]?.currency || 'USD';
+		if (availableRows.some((row) => row.currency !== currency)) {
+			throw new BadRequestException('Earnings in different currencies must be withdrawn separately.');
+		}
+		return this.withdrawalRequestsRepository.save(
+			this.withdrawalRequestsRepository.create({
+				organization,
+				status: 'pending_review',
+				amount,
+				currency,
+				availableBalanceSnapshot: amount,
+				stripeAccountId: organization.stripeAccountId,
+				requestedByUserId: user.id,
+				requestedByEmail: user.email,
+				requesterNote: payload?.note?.trim() || null,
+				sourceEntryIds: availableRows.map((row) => row.id),
+				metadata: {
+					beneficiaryType: 'influencer',
+					sourceEntryCount: availableRows.length,
+				},
+			}),
+		);
 	}
 
 	async updateStatus(id: string, status: DiscountCouponEntity['status'], user?: { id: string; role: Role }) {
@@ -300,16 +376,20 @@ export class DiscountsService {
 		coupon.status = 'active';
 		coupon.approvedByInfluencerAt = new Date();
 		coupon.declinedByInfluencerAt = null;
+		coupon.influencerDeclineReason = null;
 		return this.couponsRepository.save(coupon);
 	}
 
-	async decline(id: string, user: { id: string; role: Role }) {
+	async decline(id: string, user: { id: string; role: Role }, reason: string) {
 		const coupon = await this.couponsRepository.findOne({ where: { id } });
 		if (!coupon) throw new NotFoundException('Discount coupon not found');
 		await this.ensureInfluencerCanDecide(coupon, user.id);
+		const normalizedReason = reason?.trim();
+		if (!normalizedReason) throw new BadRequestException('A decline reason is required.');
 
 		coupon.status = 'declined';
 		coupon.declinedByInfluencerAt = new Date();
+		coupon.influencerDeclineReason = normalizedReason;
 		return this.couponsRepository.save(coupon);
 	}
 
@@ -332,19 +412,52 @@ export class DiscountsService {
 	}
 
 	private async findAgentForInfluencerUser(userId: string) {
+		return (await this.findAgentsForInfluencerUser(userId))[0] ?? null;
+	}
+
+	private async findAgentsForInfluencerUser(userId: string) {
 		const user = await this.usersRepository.findOne({ where: { id: userId } });
 		if (!this.isValidInfluencerUser(user)) {
 			throw new ForbiddenException('Only influencer accounts can access this resource');
 		}
 		await this.reconcilePendingInfluencerSignup(user);
 
-		return this.agentsRepository.findOne({
+		return this.agentsRepository.find({
 			where: [
 				{ user: { id: user.id } },
 				{ email: user.email.toLowerCase() },
 			],
 			order: { createdAt: 'DESC' },
 		});
+	}
+
+	private async ensureInfluencerUser(userId: string) {
+		const user = await this.usersRepository.findOne({ where: { id: userId } });
+		if (!this.isValidInfluencerUser(user)) {
+			throw new ForbiddenException('Only influencer accounts can access this resource');
+		}
+		return user;
+	}
+
+	private findInfluencerOrganization(userId: string) {
+		return this.organizationsRepository.findOne({
+			where: { ownerUserId: userId, type: 'influencer' },
+		});
+	}
+
+	private async findInfluencerWithdrawalRequests(userId: string) {
+		const requests = await this.withdrawalRequestsRepository.find({
+			where: { requestedByUserId: userId },
+			order: { createdAt: 'DESC' },
+		});
+		return requests.filter((request) => request.metadata?.beneficiaryType === 'influencer');
+	}
+
+	private isStripeReady(organization?: OrganizationEntity | null) {
+		return Boolean(
+			organization?.stripeAccountId &&
+			(organization.stripePayoutsEnabled || organization.stripeAccountId.startsWith('acct_mock_')),
+		);
 	}
 
 	private async reconcilePendingInfluencerSignup(user: UserEntity) {
@@ -383,7 +496,13 @@ export class DiscountsService {
 	}
 
 	private resolveCommissionPercent(order: TicketOrderEntity, coupon?: DiscountCouponEntity) {
-		if (coupon) return Number(coupon.influencerCommissionPercent || 0);
+		if (coupon) {
+			return Number(
+				coupon.influencerRewardType === 'percentage'
+					? coupon.influencerRewardValue
+					: coupon.influencerCommissionPercent || 0,
+			);
+		}
 		const code = order.referralCode?.code;
 		if (!code) return 0;
 		return 10;
@@ -543,7 +662,7 @@ export class DiscountsService {
 					{ label: 'Location', value: location },
 					{ label: 'Coupon code', value: coupon.code },
 					{ label: 'Coupon value', value: this.formatCouponValue(coupon) },
-					{ label: 'Influencer commission', value: `${Number(coupon.influencerCommissionPercent || 0)}%` },
+					{ label: 'Influencer reward', value: this.formatInfluencerReward(coupon) },
 				],
 				action: {
 					label: actionLabel,
@@ -558,6 +677,14 @@ export class DiscountsService {
 	private formatCouponValue(coupon: DiscountCouponEntity) {
 		if (coupon.type === 'percentage') return `${Number(coupon.value || 0)}% off`;
 		return `USD ${Number(coupon.value || 0).toFixed(2)} off`;
+	}
+
+	private formatInfluencerReward(coupon: DiscountCouponEntity) {
+		const rewardType = coupon.influencerRewardType || 'percentage';
+		const rewardValue = Number(coupon.influencerRewardValue || coupon.influencerCommissionPercent || 0);
+		return rewardType === 'fixed'
+			? `USD ${rewardValue.toFixed(2)} per paid order`
+			: `${rewardValue}% of tracked sales`;
 	}
 
 	private joinUrl(base: string, path: string) {
@@ -576,6 +703,9 @@ export class DiscountsService {
 
 	private async ensureInfluencerCanDecide(coupon: DiscountCouponEntity, userId: string) {
 		if (!coupon.agent) throw new BadRequestException('Coupon is not tied to an influencer');
+		if (!['pending_influencer_signup', 'pending_influencer_approval'].includes(coupon.status)) {
+			throw new BadRequestException('This campaign invitation has already been decided or is no longer available.');
+		}
 		const user = await this.usersRepository.findOne({ where: { id: userId } });
 		if (!this.isValidInfluencerUser(user) || !user?.isActive) {
 			throw new ForbiddenException('Only an active influencer can approve this coupon');

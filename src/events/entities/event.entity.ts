@@ -1,4 +1,5 @@
 import {
+	Index,
 	Column,
 	CreateDateColumn,
 	Entity,
@@ -12,6 +13,7 @@ import { EventPrivateAccessTokenEntity } from './event-private-access-token.enti
 import { TicketTypeEntity } from './ticket-type.entity';
 
 @Entity('events')
+@Index('analytics_events_created_idx', ['createdAt', 'organization'])
 export class EventEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
@@ -51,6 +53,9 @@ export class EventEntity {
 
 	@Column({ name: 'street_address', type: 'varchar', nullable: true })
 	streetAddress?: string | null;
+
+	@Column({ name: 'venue_postal_code', type: 'varchar', nullable: true })
+	venuePostalCode?: string | null;
 
 	@Column({ name: 'timezone', type: 'varchar', nullable: true })
 	timezone?: string | null;
@@ -108,6 +113,39 @@ export class EventEntity {
 
 	@Column({ name: 'refundable_percentage', type: 'int', default: 100 })
 	refundablePercentage: number;
+
+	@Column({ name: 'tax_collection_mode', type: 'varchar', default: 'none' })
+	taxCollectionMode: 'stripe_tax' | 'organizer_manual' | 'none';
+
+	@Column({ name: 'tax_responsibility', type: 'varchar', default: 'organizer' })
+	taxResponsibility: 'venue_spice' | 'organizer';
+
+	@Column({ name: 'organizer_tax_rate', type: 'decimal', precision: 8, scale: 5, default: 0 })
+	organizerTaxRate: number;
+
+	@Column({ name: 'organizer_tax_label', type: 'varchar', nullable: true })
+	organizerTaxLabel?: string | null;
+
+	@Column({ name: 'organizer_tax_permit_confirmed', type: 'boolean', default: false })
+	organizerTaxPermitConfirmed: boolean;
+
+	@Column({ name: 'organizer_tax_consent_at', type: 'timestamptz', nullable: true })
+	organizerTaxConsentAt?: Date | null;
+
+	@Column({ name: 'organizer_tax_consent_text', type: 'text', nullable: true })
+	organizerTaxConsentText?: string | null;
+
+	@Column({ name: 'venue_address_tax_confirmed', type: 'boolean', default: false })
+	venueAddressTaxConfirmed: boolean;
+
+	@Column({ name: 'venue_address_tax_confirmed_at', type: 'timestamptz', nullable: true })
+	venueAddressTaxConfirmedAt?: Date | null;
+
+	@Column({ name: 'venue_address_tax_consent_text', type: 'text', nullable: true })
+	venueAddressTaxConsentText?: string | null;
+
+	@Column({ name: 'tax_code', type: 'varchar', nullable: true })
+	taxCode?: string | null;
 
 	@OneToMany(() => TicketTypeEntity, (ticketType) => ticketType.event, {
 		cascade: true,

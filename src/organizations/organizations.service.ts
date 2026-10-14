@@ -15,6 +15,7 @@ import { Role } from '../common/enums/role.enum';
 import { NotificationsService } from '../notifications/notifications.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { UpdateOrganizationDealDto } from './dto/update-organization-deal.dto';
+import { UpdateOrganizationPayoutPolicyDto } from './dto/update-organization-payout-policy.dto';
 
 type MockStripeOnboardingDto = {
 	businessType?: string;
@@ -364,6 +365,63 @@ export class OrganizationsService {
 		return saved;
 	}
 
+	async updatePayoutPolicy(
+		id: string,
+		dto: UpdateOrganizationPayoutPolicyDto,
+		user?: { id: string; email?: string; role?: string },
+		request?: Request,
+	) {
+		const organization = await this.findOne(id);
+		if (organization.type !== 'organization') {
+			throw new BadRequestException('Payout privileges can only be applied to event organizer accounts.');
+		}
+		if (!dto.refundRiskAccepted) {
+			throw new BadRequestException('Confirm that refund, dispute, chargeback, and buyer issue responsibility has been explained.');
+		}
+
+		const startsAt = new Date(dto.startsAt);
+		const endsAt = new Date(dto.endsAt);
+		if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) {
+			throw new BadRequestException('Enter a valid payout privilege start and expiry date.');
+		}
+		if (startsAt >= endsAt) {
+			throw new BadRequestException('Payout privilege expiry date must be after the start date.');
+		}
+
+		const before = this.pickOrganizationAuditFields(organization);
+		const platformHoldDays = await this.platformSettingsService.getOrganizerPayoutHoldDays();
+		organization.payoutPolicy = dto.payoutPolicy;
+		organization.payoutDelayDays = dto.payoutDelayDays;
+		organization.payoutPolicyStartsAt = startsAt;
+		organization.payoutPolicyEndsAt = endsAt;
+		organization.payoutPolicyReason = dto.reason?.trim() || null;
+		organization.payoutPolicyRefundRiskAcceptedAt = new Date();
+		organization.payoutPolicyRefundRiskAcceptedBy = user?.id || null;
+
+		const saved = await this.organizationsRepository.save(organization);
+		const after = this.pickOrganizationAuditFields(saved);
+
+		await this.auditService.log(
+			'organization.payout_policy.updated',
+			user,
+			'organization',
+			saved.id,
+			this.buildChanges(before, after),
+			{
+				notifyOrganizer: Boolean(dto.notifyOrganizer),
+				platformHoldDays,
+				refundRiskAccepted: dto.refundRiskAccepted,
+			},
+			request,
+		);
+
+		if (dto.notifyOrganizer) {
+			await this.notifyOrganizerPayoutPolicy(saved, platformHoldDays);
+		}
+
+		return saved;
+	}
+
 	async checkOrganizerUsernameAvailability(username: string, organizationId?: string) {
 		const normalized = this.normalizeOrganizerUsername(username);
 		const validationMessage = this.validateOrganizerUsername(normalized);
@@ -566,6 +624,13 @@ export class OrganizationsService {
 			dealVenueSpiceFeeFixed: organization.dealVenueSpiceFeeFixed,
 			dealStartsAt: organization.dealStartsAt,
 			dealEndsAt: organization.dealEndsAt,
+			payoutPolicy: organization.payoutPolicy,
+			payoutDelayDays: organization.payoutDelayDays,
+			payoutPolicyStartsAt: organization.payoutPolicyStartsAt,
+			payoutPolicyEndsAt: organization.payoutPolicyEndsAt,
+			payoutPolicyReason: organization.payoutPolicyReason,
+			payoutPolicyRefundRiskAcceptedAt: organization.payoutPolicyRefundRiskAcceptedAt,
+			payoutPolicyRefundRiskAcceptedBy: organization.payoutPolicyRefundRiskAcceptedBy,
 		};
 	}
 
@@ -624,6 +689,54 @@ export class OrganizationsService {
 			minimumFractionDigits: 2,
 			maximumFractionDigits: 2,
 		}).format(Number(value ?? 0));
+	}
+
+	private async notifyOrganizerPayoutPolicy(organization: OrganizationEntity, platformHoldDays: number) {
+		const owner = organization.ownerUserId
+			? await this.usersRepository.findOne({ where: { id: organization.ownerUserId } })
+			: null;
+		const to = organization.contactEmail || organization.businessEmail || owner?.email;
+		if (!to) return;
+
+		const dashboardUrl = this.configService.get<string>('FRONTEND_DASHBOARD_URL')
+			|| `${this.configService.get<string>('WEB_APP_URL', 'http://localhost:3000').replace(/\/$/, '')}/dashboard/account`;
+		const delayDays = Number(organization.payoutDelayDays ?? 0);
+
+		await this.notificationsService.queueEmail(
+			to,
+			'Your Venue Spice payout schedule has been updated',
+			this.notificationsService.buildBrandedEmail({
+				eyebrow: 'Organizer payout privilege',
+				title: 'Your payout schedule has been updated',
+				greeting: `Hello ${organization.name},`,
+				intro:
+					'Venue Spice has approved a temporary payout privilege for your event organizer account.',
+				body:
+					'<p>This means eligible new paid orders during the active period may become withdrawable earlier than the standard Venue Spice schedule.</p><p><strong>Important:</strong> because funds may be released earlier, refund requests, disputes, chargebacks, cancelled events, buyer complaints, and related resolution costs remain your responsibility during this privilege period.</p>',
+				rows: [
+					{ label: 'Standard Venue Spice payout timing', value: `${platformHoldDays} day${platformHoldDays === 1 ? '' : 's'} after event end` },
+					{ label: 'Your temporary payout timing', value: this.formatPayoutPolicyLabel(organization.payoutPolicy, delayDays) },
+					{ label: 'Starts', value: organization.payoutPolicyStartsAt ?? new Date() },
+					{ label: 'Expires', value: organization.payoutPolicyEndsAt ?? new Date() },
+					...(organization.payoutPolicyReason ? [{ label: 'Reason', value: organization.payoutPolicyReason }] : []),
+				],
+				action: {
+					label: 'Open organizer account',
+					url: dashboardUrl,
+				},
+				note:
+					'Venue Spice may pause, expire, or revoke this privilege if refund risk, chargeback risk, compliance concerns, or buyer support issues increase.',
+			}),
+		);
+	}
+
+	private formatPayoutPolicyLabel(policy: OrganizationEntity['payoutPolicy'], delayDays: number) {
+		const delay = delayDays === 0
+			? 'immediately'
+			: `after ${delayDays} day${delayDays === 1 ? '' : 's'}`;
+		if (policy === 'after_payment') return delayDays === 0 ? 'Immediately after payment' : `${delay} from buyer payment`;
+		if (policy === 'after_event') return delayDays === 0 ? 'Immediately after event end' : `${delay} from event end`;
+		return 'Platform default';
 	}
 
 	private buildChanges(before: Record<string, unknown>, after: Record<string, unknown>) {

@@ -35,6 +35,15 @@ export class CreateDiscountCouponDto {
 	influencerCommissionPercent: number;
 
 	@IsOptional()
+	@IsIn(['percentage', 'fixed'])
+	influencerRewardType?: 'percentage' | 'fixed';
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	influencerRewardValue?: number;
+
+	@IsOptional()
 	@IsDateString()
 	startsAt?: string;
 

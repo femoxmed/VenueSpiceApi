@@ -36,6 +36,12 @@ export class DiscountCouponEntity {
 	@Column({ name: 'influencer_commission_percent', type: 'decimal', precision: 5, scale: 2, default: 0 })
 	influencerCommissionPercent: number;
 
+	@Column({ name: 'influencer_reward_type', type: 'varchar', default: 'percentage' })
+	influencerRewardType: 'percentage' | 'fixed';
+
+	@Column({ name: 'influencer_reward_value', type: 'decimal', precision: 10, scale: 2, default: 0 })
+	influencerRewardValue: number;
+
 	@Column({ name: 'starts_at', type: 'timestamptz', nullable: true })
 	startsAt?: Date | null;
 
@@ -64,6 +70,9 @@ export class DiscountCouponEntity {
 
 	@Column({ name: 'declined_by_influencer_at', type: 'timestamptz', nullable: true })
 	declinedByInfluencerAt?: Date | null;
+
+	@Column({ name: 'influencer_decline_reason', type: 'text', nullable: true })
+	influencerDeclineReason?: string | null;
 
 	@CreateDateColumn({ name: 'created_at' })
 	createdAt: Date;

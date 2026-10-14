@@ -41,4 +41,12 @@ export class UpdatePlatformSettingsDto {
 	@IsOptional()
 	@IsIn(['exclusive', 'inclusive', 'unspecified'])
 	stripeTaxBehavior?: 'exclusive' | 'inclusive' | 'unspecified';
+
+	@IsOptional()
+	@IsString()
+	supportedTaxRegions?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	allowOrganizerManualTax?: boolean;
 }

@@ -57,8 +57,10 @@ export class PaymentsService {
 		private readonly notificationsService: NotificationsService,
 	) {}
 
-	listIntents() {
+	listIntents(query: { status?: string } = {}) {
+		const status = this.normalizeIntentStatus(query.status);
 		return this.paymentIntentsRepository.find({
+			where: status ? { status } : undefined,
 			relations: { invoice: { serviceBooking: true, user: true }, order: true },
 			order: { createdAt: 'DESC' },
 		});
@@ -365,6 +367,13 @@ export class PaymentsService {
 
 	private toSubunit(amount: number) {
 		return Math.round(Number(amount) * 100);
+	}
+
+	private normalizeIntentStatus(status?: string) {
+		const normalized = String(status || '').trim().toLowerCase();
+		if (!normalized || normalized === 'all') return undefined;
+		if (['pending', 'initialized', 'succeeded', 'failed'].includes(normalized)) return normalized;
+		return undefined;
 	}
 
 	private async initializePaystackIntent(intent: PaymentIntentEntity) {

@@ -96,6 +96,8 @@ const platformSettings = [
 	['STRIPE_AUTOMATIC_TAX_ENABLED', 'true', 'boolean', 'Enable Stripe Automatic Tax for ticket checkout sessions.'],
 	['STRIPE_TAX_CODE', '', 'string', 'Optional Stripe tax code applied to checkout products.'],
 	['STRIPE_TAX_BEHAVIOR', 'exclusive', 'string', 'Stripe price tax behavior for checkout line items.'],
+	['SUPPORTED_TAX_REGIONS', 'US:TX', 'string', 'Comma-separated country/state regions where Venue Spice collects tax.'],
+	['ALLOW_ORGANIZER_MANUAL_TAX', 'true', 'boolean', 'Allow organizers outside supported tax regions to enter a tax rate after accepting responsibility.'],
 ] satisfies Array<[string, string, 'string' | 'number' | 'boolean', string]>;
 
 function isEnabled(value?: string | boolean | number | null) {

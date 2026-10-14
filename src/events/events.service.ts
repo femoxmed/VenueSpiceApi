@@ -1,4 +1,5 @@
 import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Request } from 'express';
@@ -7,6 +8,10 @@ import { OrganizationEntity } from '../organizations/entities/organization.entit
 import { OrganizationsService } from '../organizations/organizations.service';
 import { Role } from '../common/enums/role.enum';
 import { AuditService } from '../audit/audit.service';
+import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { CreateEventDto } from './dto/create-event.dto';
 import { EventEntity } from './entities/event.entity';
 import { EventPrivateAccessTokenEntity } from './entities/event-private-access-token.entity';
@@ -26,8 +31,14 @@ export class EventsService {
 		private readonly organizationsRepository: Repository<OrganizationEntity>,
 		@InjectRepository(TicketTypeEntity)
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
+		@InjectRepository(TicketOrderEntity)
+		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
 		private readonly organizationsService: OrganizationsService,
 		private readonly auditService: AuditService,
+		private readonly financialLedgerService: FinancialLedgerService,
+		private readonly notificationsService: NotificationsService,
+		private readonly configService: ConfigService,
+		private readonly platformSettingsService: PlatformSettingsService,
 	) {}
 
 	findAll(organizationId?: string, user?: { id: string; role: Role }) {
@@ -212,6 +223,7 @@ export class EventsService {
 		const endsAt = dto.endsAt ? new Date(dto.endsAt) : null;
 		this.validateCreateDate(startsAt);
 		this.validateTicketSalesWindowsForEvent(dto.ticketTypes || [], endsAt || startsAt);
+		const taxSettings = await this.resolveEventTaxSettings(dto, dto.status || 'draft');
 		this.validateDraftTransition({
 			currentStatus: 'draft',
 			nextStatus: dto.status || 'draft',
@@ -233,6 +245,7 @@ export class EventsService {
 			privateAccessTokenHash: privateAccessToken ? this.hashSecret(privateAccessToken) : null,
 			accessCodeHash: accessCode ? this.hashSecret(accessCode) : null,
 			accessCodeUpdatedAt: accessCode ? new Date() : null,
+			...taxSettings,
 			refundsAllowed: dto.refundsAllowed ?? true,
 			refundCutoffHours: this.normalizeRefundCutoffHours(dto.refundCutoffHours),
 			refundablePercentage: this.normalizeRefundablePercentage(dto.refundablePercentage),
@@ -251,6 +264,97 @@ export class EventsService {
 		return this.toDashboardEvent(saved);
 	}
 
+	async clone(id: string, user?: { id: string; role: Role }, request?: Request) {
+		const source = await this.findOneEntity(id, user);
+		const organization = source.organization;
+		if (!organization) throw new BadRequestException('Event organizer not found');
+
+		const title = await this.buildClonedEventTitle(source.title);
+		const slug = await this.buildUniqueSlug(this.slugify(title));
+		const clonedEvent = this.eventsRepository.create({
+			title,
+			slug,
+			description: source.description,
+			category: source.category,
+			organizerName: source.organizerName,
+			venue: source.venue,
+			country: source.country,
+			city: source.city,
+			state: source.state,
+			streetAddress: source.streetAddress,
+			venuePostalCode: source.venuePostalCode,
+			timezone: source.timezone,
+			isVirtual: source.isVirtual,
+			startsAt: source.startsAt,
+			endsAt: source.endsAt,
+			coverImageUrl: source.coverImageUrl,
+			imageUrls: [...(source.imageUrls || [])],
+			socialLinks: { ...(source.socialLinks || {}) },
+			appearances: this.cloneJson(source.appearances || []),
+			addOns: this.cloneJson(source.addOns || []),
+			faqs: this.normalizeFaqs(source.faqs),
+			status: 'draft',
+			visibility: source.visibility || 'public',
+			privateAccessToken: null,
+			privateAccessTokenHash: null,
+			accessCodeHash: null,
+			accessCodeUpdatedAt: null,
+			refundsAllowed: source.refundsAllowed,
+			refundCutoffHours: this.normalizeRefundCutoffHours(source.refundCutoffHours),
+			refundablePercentage: this.normalizeRefundablePercentage(source.refundablePercentage),
+			taxCollectionMode: source.taxCollectionMode,
+			taxResponsibility: source.taxResponsibility,
+			organizerTaxRate: Number(source.organizerTaxRate || 0),
+			organizerTaxLabel: source.organizerTaxLabel,
+			organizerTaxPermitConfirmed: source.organizerTaxPermitConfirmed,
+			organizerTaxConsentAt: source.organizerTaxConsentAt,
+			organizerTaxConsentText: source.organizerTaxConsentText,
+			venueAddressTaxConfirmed: source.venueAddressTaxConfirmed,
+			venueAddressTaxConfirmedAt: source.venueAddressTaxConfirmedAt,
+			venueAddressTaxConsentText: source.venueAddressTaxConsentText,
+			taxCode: source.taxCode,
+			organization,
+			ticketTypes: (source.ticketTypes || []).map((ticket) => this.ticketTypesRepository.create({
+				name: ticket.name,
+				price: Number(ticket.price || 0),
+				quantity: Number(ticket.quantity || 0),
+				limitPerPerson: ticket.limitPerPerson,
+				admissionType: ticket.admissionType ?? 'single',
+				groupSize: ticket.groupSize,
+				collectGroupAttendeeDetails: Boolean(ticket.collectGroupAttendeeDetails),
+				attendeeDetailsRequired: Boolean(ticket.attendeeDetailsRequired ?? ticket.collectGroupAttendeeDetails),
+				salesStartAt: ticket.salesStartAt,
+				salesEndAt: ticket.salesEndAt,
+				description: ticket.description,
+				includeCharges: ticket.includeCharges,
+				quantitySold: 0,
+				status: 'active',
+			})),
+		});
+		const saved = await this.eventsRepository.save(clonedEvent);
+		await this.auditService.log(
+			'event.cloned',
+			user,
+			'event',
+			saved.id,
+			{
+				sourceEventId: { before: null, after: source.id },
+				status: { before: source.status, after: 'draft' },
+				title: { before: source.title, after: saved.title },
+			},
+			{
+				organizationId: organization.id,
+				organizationName: organization.name,
+				sourceEventId: source.id,
+				sourceEventTitle: source.title,
+				clonedEventId: saved.id,
+				clonedEventTitle: saved.title,
+			},
+			request,
+		);
+		return this.toDashboardEvent(saved);
+	}
+
 	async update(
 		id: string,
 		dto: Partial<CreateEventDto> & { status?: EventEntity['status'] },
@@ -260,15 +364,56 @@ export class EventsService {
 		this.validatePricing(dto);
 		const event = await this.findOneEntity(id, user);
 		const before = this.pickEventAuditFields(event);
-		if (dto.slug && dto.slug !== event.slug) {
-			const existing = await this.eventsRepository.findOne({ where: { slug: dto.slug } });
-			if (existing) throw new BadRequestException('Event slug already exists');
+		const previousPayoutAnchor = event.endsAt || event.startsAt;
+		let nextSlug = event.slug;
+		if (dto.slug !== undefined) {
+			const normalizedSlug = this.slugify(dto.slug);
+			if (!normalizedSlug) throw new BadRequestException('Event slug is required');
+			const existing = await this.eventsRepository.findOne({ where: { slug: normalizedSlug } });
+			if (existing && existing.id !== event.id) throw new BadRequestException('Event slug already exists');
+			nextSlug = normalizedSlug;
+		} else if (event.status === 'draft' && dto.title?.trim() && dto.title.trim() !== event.title) {
+			nextSlug = await this.buildUniqueSlug(this.slugify(dto.title), event.id);
 		}
 
-		const { ticketTypes, accessCode: _accessCode, ...eventPatch } = dto;
+		const {
+			ticketTypes,
+			slug: _slug,
+			accessCode: _accessCode,
+			dateChangeConfirmed,
+			dateChangeReason,
+			taxCollectionMode: _taxCollectionMode,
+			taxResponsibility: _taxResponsibility,
+			organizerTaxRate: _organizerTaxRate,
+			organizerTaxLabel: _organizerTaxLabel,
+			organizerTaxPermitConfirmed: _organizerTaxPermitConfirmed,
+			organizerTaxConsentText: _organizerTaxConsentText,
+			venueAddressTaxConfirmed: _venueAddressTaxConfirmed,
+			venueAddressTaxConsentText: _venueAddressTaxConsentText,
+			taxCode: _taxCode,
+			...eventPatch
+		} = dto;
 		const nextStartsAt = dto.startsAt ? new Date(dto.startsAt) : event.startsAt;
 		const nextEndsAt = dto.endsAt ? new Date(dto.endsAt) : event.endsAt || nextStartsAt;
-		this.validateTicketSalesWindowsForEvent(dto.ticketTypes || [], nextEndsAt);
+		const dateChange = this.getEventDateChange(event, nextStartsAt, nextEndsAt, dto.timezone);
+		const impactedOrderCount = dateChange.changed ? await this.countImpactedOrders(event.id) : 0;
+		this.validateOrganizerDateChangePolicy({
+			event,
+			nextStartsAt,
+			nextEndsAt,
+			dateChange,
+			impactedOrderCount,
+			dateChangeConfirmed,
+		});
+		this.validateTicketSalesWindowsForEvent(
+			ticketTypes || event.ticketTypes.map((ticket) => ({
+				name: ticket.name,
+				price: Number(ticket.price || 0),
+				quantity: Number(ticket.quantity || 0),
+				salesEndAt: ticket.salesEndAt ? ticket.salesEndAt.toISOString() : undefined,
+			})),
+			nextEndsAt,
+		);
 		this.validateDraftTransition({
 			currentStatus: event.status,
 			nextStatus: dto.status || event.status,
@@ -297,6 +442,11 @@ export class EventsService {
 			},
 			event.organization,
 		);
+		const taxSettings = await this.resolveEventTaxSettings(
+			{ ...this.eventToTaxDto(event), ...dto },
+			dto.status || event.status,
+			event,
+		);
 
 		let generatedPrivateAccessToken: string | null = null;
 		const nextVisibility = dto.visibility ?? event.visibility;
@@ -306,6 +456,7 @@ export class EventsService {
 
 		Object.assign(event, {
 			...eventPatch,
+			slug: nextSlug,
 			startsAt: nextStartsAt,
 			endsAt: nextEndsAt,
 			visibility: nextVisibility,
@@ -317,6 +468,7 @@ export class EventsService {
 				: generatedPrivateAccessToken
 					? this.hashSecret(generatedPrivateAccessToken)
 					: event.privateAccessTokenHash || (event.privateAccessToken ? this.hashSecret(event.privateAccessToken) : null),
+			...taxSettings,
 			refundsAllowed: dto.refundsAllowed ?? event.refundsAllowed,
 			refundCutoffHours: dto.refundCutoffHours !== undefined ? this.normalizeRefundCutoffHours(dto.refundCutoffHours) : event.refundCutoffHours,
 			refundablePercentage: dto.refundablePercentage !== undefined ? this.normalizeRefundablePercentage(dto.refundablePercentage) : event.refundablePercentage,
@@ -342,6 +494,12 @@ export class EventsService {
 		}
 
 		const saved = await this.eventsRepository.save(event);
+		await this.financialLedgerService.delayPendingOrganizerNetForEventDateChange(
+			saved,
+			previousPayoutAnchor,
+			saved.endsAt || saved.startsAt,
+			user,
+		);
 		if (generatedPrivateAccessToken) {
 			await this.revokePrivateAccessTokens(saved.id, user?.id ?? null);
 			await this.createPrivateAccessTokenRecord(saved, generatedPrivateAccessToken, user?.id ?? null);
@@ -359,9 +517,20 @@ export class EventsService {
 				organizationId: saved.organization?.id,
 				organizationName: saved.organization?.name,
 				eventTitle: saved.title,
+				...(dateChange.changed ? {
+					dateChange: {
+						...dateChange,
+						confirmed: Boolean(dateChangeConfirmed),
+						reason: dateChangeReason?.trim() || null,
+						impactedOrderCount,
+					},
+				} : {}),
 			},
 			request,
 		);
+		if (dateChange.changed && impactedOrderCount > 0 && dateChangeConfirmed) {
+			await this.notifyTicketBuyersAboutDateChange(saved, dateChange, dateChangeReason);
+		}
 		return generatedPrivateAccessToken ? this.withPrivateAccessToken(saved, generatedPrivateAccessToken) : this.toDashboardEvent(saved);
 	}
 
@@ -520,6 +689,322 @@ export class EventsService {
 		});
 	}
 
+	private getEventDateChange(
+		event: EventEntity,
+		nextStartsAt: Date,
+		nextEndsAt: Date,
+		nextTimezone?: string,
+	) {
+		const previousStartsAt = this.toDateOrNull(event.startsAt);
+		const previousEndsAt = this.toDateOrNull(event.endsAt || event.startsAt);
+		const normalizedNextStartsAt = this.toDateOrNull(nextStartsAt);
+		const normalizedNextEndsAt = this.toDateOrNull(nextEndsAt || nextStartsAt);
+		const previousTimezone = event.timezone || null;
+		const normalizedNextTimezone = nextTimezone === undefined ? previousTimezone : nextTimezone || null;
+		const previousStartMs = previousStartsAt?.getTime() ?? null;
+		const previousEndMs = previousEndsAt?.getTime() ?? null;
+		const nextStartMs = normalizedNextStartsAt?.getTime() ?? null;
+		const nextEndMs = normalizedNextEndsAt?.getTime() ?? null;
+
+		return {
+			changed:
+				previousStartMs !== nextStartMs ||
+				previousEndMs !== nextEndMs ||
+				previousTimezone !== normalizedNextTimezone,
+			previousStartsAt: previousStartsAt?.toISOString() ?? null,
+			previousEndsAt: previousEndsAt?.toISOString() ?? null,
+			nextStartsAt: normalizedNextStartsAt?.toISOString() ?? null,
+			nextEndsAt: normalizedNextEndsAt?.toISOString() ?? null,
+			previousTimezone,
+			nextTimezone: normalizedNextTimezone,
+			startChanged: previousStartMs !== nextStartMs,
+			endChanged: previousEndMs !== nextEndMs,
+			timezoneChanged: previousTimezone !== normalizedNextTimezone,
+		};
+	}
+
+	private async countImpactedOrders(eventId: string) {
+		return this.ticketOrdersRepository
+			.createQueryBuilder('ticket_order')
+			.where('ticket_order."eventId" = :eventId', { eventId })
+			.andWhere('ticket_order.status = :status', { status: 'paid' })
+			.getCount();
+	}
+
+	private validateOrganizerDateChangePolicy({
+		event,
+		nextStartsAt,
+		nextEndsAt,
+		dateChange,
+		impactedOrderCount,
+		dateChangeConfirmed,
+	}: {
+		event: EventEntity;
+		nextStartsAt: Date;
+		nextEndsAt: Date;
+		dateChange: ReturnType<EventsService['getEventDateChange']>;
+		impactedOrderCount: number;
+		dateChangeConfirmed?: boolean;
+	}) {
+		if (!dateChange.changed) return;
+
+		const currentStartsAt = this.toDateOrNull(event.startsAt);
+		const currentEndsAt = this.toDateOrNull(event.endsAt || event.startsAt);
+		const normalizedNextStartsAt = this.toDateOrNull(nextStartsAt);
+		const normalizedNextEndsAt = this.toDateOrNull(nextEndsAt || nextStartsAt);
+
+		if (!currentStartsAt || !currentEndsAt) {
+			throw new BadRequestException('Current event date is invalid. Please refresh and try again.');
+		}
+		if (!normalizedNextStartsAt || !normalizedNextEndsAt) {
+			throw new BadRequestException('Enter a valid event start and end date.');
+		}
+		if (normalizedNextEndsAt.getTime() < normalizedNextStartsAt.getTime()) {
+			throw new BadRequestException('Event end date must be after the start date.');
+		}
+
+		const now = Date.now();
+		const eventStarted = currentStartsAt.getTime() <= now;
+		const eventEnded = currentEndsAt.getTime() <= now;
+
+		if (eventStarted && normalizedNextStartsAt.getTime() !== currentStartsAt.getTime()) {
+			throw new BadRequestException('This event has already started. You can only extend the event end time.');
+		}
+
+		if (eventStarted && normalizedNextEndsAt.getTime() < currentEndsAt.getTime()) {
+			throw new BadRequestException('This event has already started. You can only extend the event end time.');
+		}
+
+		if (eventEnded && normalizedNextEndsAt.getTime() <= currentEndsAt.getTime()) {
+			throw new BadRequestException('This event has ended. Use the extend flow by setting a later end time.');
+		}
+
+		if (event.status !== 'draft' && impactedOrderCount > 0 && !dateChangeConfirmed) {
+			throw new BadRequestException(
+				'DATE_CHANGE_CONFIRMATION_REQUIRED: Changing the event date or time may affect ticket holders, refunds, influencer campaigns, and check-in. Buyers will be notified of this change.',
+			);
+		}
+	}
+
+	private async notifyTicketBuyersAboutDateChange(
+		event: EventEntity,
+		dateChange: ReturnType<EventsService['getEventDateChange']>,
+		reason?: string,
+	) {
+		const orders = await this.ticketOrdersRepository.find({
+			where: { event: { id: event.id }, status: 'paid' },
+			order: { paidAt: 'DESC', createdAt: 'DESC' },
+		});
+		const recipients = new Map<string, { name: string; email: string }>();
+		orders.forEach((order) => {
+			const email = order.customerEmail?.trim().toLowerCase();
+			if (!email || recipients.has(email)) return;
+			recipients.set(email, { name: order.customerName || 'there', email: order.customerEmail });
+		});
+		if (!recipients.size) return;
+
+		const eventUrl = this.getPublicEventUrl(event);
+		const rows = [
+			{ label: 'Event', value: event.title },
+			{ label: 'Previous date/time', value: this.formatEventDateRange(dateChange.previousStartsAt, dateChange.previousEndsAt, dateChange.previousTimezone) },
+			{ label: 'New date/time', value: this.formatEventDateRange(dateChange.nextStartsAt, dateChange.nextEndsAt, dateChange.nextTimezone) },
+			{ label: 'Timezone', value: dateChange.nextTimezone || dateChange.previousTimezone || 'Event timezone' },
+			...(reason?.trim() ? [{ label: 'Reason', value: reason.trim() }] : []),
+		];
+
+		await Promise.all(
+			Array.from(recipients.values()).map((recipient) =>
+				this.notificationsService.queueEmail(
+					recipient.email,
+					`Update: ${event.title} date/time changed`,
+					this.notificationsService.buildBrandedEmail({
+						eyebrow: 'Event update',
+						title: 'An event you booked has a new date or time',
+						greeting: `Hello ${recipient.name},`,
+						intro: `The organiser updated the schedule for ${event.title}. Please review the new date and time below.`,
+						rows,
+						action: eventUrl ? { label: 'View Event', url: eventUrl } : undefined,
+						note: 'Your ticket remains valid. If this change affects your plans, please review the event refund policy or contact support.',
+					}),
+				),
+			),
+		);
+	}
+
+	private formatEventDateRange(start?: string | null, end?: string | null, timeZone?: string | null) {
+		const startDate = this.toDateOrNull(start);
+		const endDate = this.toDateOrNull(end);
+		const formatter = new Intl.DateTimeFormat('en-US', {
+			dateStyle: 'medium',
+			timeStyle: 'short',
+			timeZone: timeZone || 'UTC',
+		});
+		const formattedStart = startDate ? formatter.format(startDate) : 'Not set';
+		const formattedEnd = endDate ? formatter.format(endDate) : 'Not set';
+		return formattedStart === formattedEnd ? formattedStart : `${formattedStart} - ${formattedEnd}`;
+	}
+
+	private getPublicEventUrl(event: EventEntity) {
+		const frontendUrl = this.configService.get<string>('FRONTEND_URL') || this.configService.get<string>('APP_URL');
+		if (!frontendUrl) return null;
+		return `${frontendUrl.replace(/\/+$/, '')}/events/${event.slug || event.id}`;
+	}
+
+	private async resolveEventTaxSettings(
+		dto: Partial<CreateEventDto>,
+		nextStatus: EventEntity['status'],
+		existing?: EventEntity,
+	) {
+		const settings = await this.platformSettingsService.getPricingSettings();
+		const country = dto.country ?? existing?.country ?? null;
+		const state = dto.state ?? existing?.state ?? null;
+		const isVirtual = dto.isVirtual ?? existing?.isVirtual ?? false;
+		const supported = !isVirtual && this.isSupportedVenueSpiceTaxRegion(country, state, settings.supportedTaxRegions);
+		const defaultTaxCode = settings.stripeTaxCode?.trim() || null;
+		const venuePostalCode = dto.venuePostalCode?.trim() || existing?.venuePostalCode || null;
+		const venueAddressTaxConfirmed = Boolean(dto.venueAddressTaxConfirmed ?? existing?.venueAddressTaxConfirmed ?? false);
+		const venueAddressTaxConsentText = dto.venueAddressTaxConsentText?.trim()
+			|| existing?.venueAddressTaxConsentText
+			|| this.defaultVenueAddressTaxConsentText();
+
+		if (supported && settings.stripeAutomaticTaxEnabled) {
+			if (nextStatus === 'published') {
+				if (!venuePostalCode) {
+					throw new BadRequestException('Venue ZIP/postal code is required for tax calculation.');
+				}
+				if (!venueAddressTaxConfirmed) {
+					throw new BadRequestException('Confirm that the venue address and ZIP/postal code are accurate for tax calculation.');
+				}
+			}
+			const addressConfirmationChanged = (
+				dto.venueAddressTaxConfirmed !== undefined ||
+				dto.venueAddressTaxConsentText !== undefined ||
+				existing?.taxCollectionMode !== 'stripe_tax'
+			);
+			return {
+				taxCollectionMode: 'stripe_tax' as const,
+				taxResponsibility: 'venue_spice' as const,
+				organizerTaxRate: 0,
+				organizerTaxLabel: null,
+				organizerTaxPermitConfirmed: false,
+				organizerTaxConsentAt: null,
+				organizerTaxConsentText: null,
+				venueAddressTaxConfirmed,
+				venueAddressTaxConfirmedAt: venueAddressTaxConfirmed
+					? addressConfirmationChanged
+						? new Date()
+						: existing?.venueAddressTaxConfirmedAt ?? new Date()
+					: null,
+				venueAddressTaxConsentText: venueAddressTaxConfirmed ? venueAddressTaxConsentText : null,
+				taxCode: dto.taxCode?.trim() || existing?.taxCode || defaultTaxCode,
+			};
+		}
+
+		const requestedMode = dto.taxCollectionMode ?? existing?.taxCollectionMode ?? 'none';
+		const manualTaxRequested = requestedMode === 'organizer_manual';
+		const organizerTaxRate = this.roundTaxRate(dto.organizerTaxRate ?? existing?.organizerTaxRate ?? 0);
+		const organizerTaxPermitConfirmed = Boolean(dto.organizerTaxPermitConfirmed ?? existing?.organizerTaxPermitConfirmed ?? false);
+		const organizerTaxConsentText = dto.organizerTaxConsentText?.trim()
+			|| existing?.organizerTaxConsentText
+			|| this.defaultOrganizerTaxConsentText();
+
+		if (requestedMode === 'stripe_tax' && !supported) {
+			throw new BadRequestException('Venue Spice tax collection is currently available only for supported tax regions.');
+		}
+		if (manualTaxRequested && !settings.allowOrganizerManualTax) {
+			throw new BadRequestException('Organizer manual tax collection is currently disabled.');
+		}
+		if (nextStatus === 'published' && manualTaxRequested) {
+			if (organizerTaxRate <= 0) {
+				throw new BadRequestException('Enter the organizer tax rate before publishing this event.');
+			}
+			if (!organizerTaxPermitConfirmed) {
+				throw new BadRequestException('Confirm that you have authority to collect and remit this event tax.');
+			}
+		}
+
+		const consentChanged = manualTaxRequested && (
+			dto.organizerTaxPermitConfirmed !== undefined ||
+			dto.organizerTaxRate !== undefined ||
+			dto.organizerTaxConsentText !== undefined ||
+			existing?.taxCollectionMode !== 'organizer_manual'
+		);
+
+		return {
+			taxCollectionMode: manualTaxRequested ? 'organizer_manual' as const : 'none' as const,
+			taxResponsibility: 'organizer' as const,
+			organizerTaxRate: manualTaxRequested ? organizerTaxRate : 0,
+			organizerTaxLabel: manualTaxRequested ? (dto.organizerTaxLabel?.trim() || existing?.organizerTaxLabel || 'Tax') : null,
+			organizerTaxPermitConfirmed: manualTaxRequested ? organizerTaxPermitConfirmed : false,
+			organizerTaxConsentAt: manualTaxRequested && organizerTaxPermitConfirmed
+				? consentChanged
+					? new Date()
+					: existing?.organizerTaxConsentAt ?? new Date()
+				: null,
+			organizerTaxConsentText: manualTaxRequested ? organizerTaxConsentText : null,
+			venueAddressTaxConfirmed: false,
+			venueAddressTaxConfirmedAt: null,
+			venueAddressTaxConsentText: null,
+			taxCode: dto.taxCode?.trim() || existing?.taxCode || defaultTaxCode,
+		};
+	}
+
+	private eventToTaxDto(event: EventEntity): Partial<CreateEventDto> {
+		return {
+			country: event.country ?? undefined,
+			state: event.state ?? undefined,
+			venuePostalCode: event.venuePostalCode ?? undefined,
+			isVirtual: event.isVirtual,
+			taxCollectionMode: event.taxCollectionMode,
+			taxResponsibility: event.taxResponsibility,
+			organizerTaxRate: Number(event.organizerTaxRate || 0),
+			organizerTaxLabel: event.organizerTaxLabel ?? undefined,
+			organizerTaxPermitConfirmed: event.organizerTaxPermitConfirmed,
+			organizerTaxConsentText: event.organizerTaxConsentText ?? undefined,
+			venueAddressTaxConfirmed: event.venueAddressTaxConfirmed,
+			venueAddressTaxConsentText: event.venueAddressTaxConsentText ?? undefined,
+			taxCode: event.taxCode ?? undefined,
+		};
+	}
+
+	private isSupportedVenueSpiceTaxRegion(country?: string | null, state?: string | null, configuredRegions = 'US:TX') {
+		const countryCode = this.normalizeCountryCode(country);
+		const stateCode = this.normalizeStateCode(state);
+		if (!countryCode || !stateCode) return false;
+		return configuredRegions
+			.split(',')
+			.map((region) => region.trim().toUpperCase())
+			.filter(Boolean)
+			.includes(`${countryCode}:${stateCode}`);
+	}
+
+	private normalizeCountryCode(value?: string | null) {
+		const normalized = String(value || '').trim().toLowerCase();
+		if (!normalized) return '';
+		if (['us', 'usa', 'united states', 'united states of america'].includes(normalized)) return 'US';
+		return normalized.length === 2 ? normalized.toUpperCase() : normalized;
+	}
+
+	private normalizeStateCode(value?: string | null) {
+		const normalized = String(value || '').trim().toLowerCase();
+		if (!normalized) return '';
+		if (['tx', 'texas'].includes(normalized)) return 'TX';
+		return normalized.length === 2 ? normalized.toUpperCase() : normalized;
+	}
+
+	private roundTaxRate(value: unknown) {
+		const numeric = Number(value);
+		return Number.isFinite(numeric) && numeric > 0 ? Math.round(numeric * 100000) / 100000 : 0;
+	}
+
+	private defaultOrganizerTaxConsentText() {
+		return 'I confirm that I am responsible for determining, collecting, reporting, and remitting applicable taxes for this event, and that I have the required permit or authority to collect any tax rate I enter.';
+	}
+
+	private defaultVenueAddressTaxConsentText() {
+		return 'I confirm that the venue address, city, state, country, and ZIP/postal code are accurate for tax calculation.';
+	}
+
 	private pickEventAuditFields(event: EventEntity) {
 		return {
 			title: event.title,
@@ -532,6 +1017,7 @@ export class EventsService {
 			state: event.state,
 			city: event.city,
 			streetAddress: event.streetAddress,
+			venuePostalCode: event.venuePostalCode,
 			timezone: event.timezone,
 			isVirtual: event.isVirtual,
 			startsAt: this.toIsoOrNull(event.startsAt),
@@ -547,6 +1033,17 @@ export class EventsService {
 			refundsAllowed: event.refundsAllowed,
 			refundCutoffHours: event.refundCutoffHours,
 			refundablePercentage: event.refundablePercentage,
+			taxCollectionMode: event.taxCollectionMode,
+			taxResponsibility: event.taxResponsibility,
+			organizerTaxRate: Number(event.organizerTaxRate || 0),
+			organizerTaxLabel: event.organizerTaxLabel,
+			organizerTaxPermitConfirmed: event.organizerTaxPermitConfirmed,
+			organizerTaxConsentAt: this.toIsoOrNull(event.organizerTaxConsentAt),
+			organizerTaxConsentText: event.organizerTaxConsentText,
+			venueAddressTaxConfirmed: event.venueAddressTaxConfirmed,
+			venueAddressTaxConfirmedAt: this.toIsoOrNull(event.venueAddressTaxConfirmedAt),
+			venueAddressTaxConsentText: event.venueAddressTaxConsentText,
+			taxCode: event.taxCode,
 			ticketTypes: this.stableJson(
 				(event.ticketTypes || []).map((ticket) => ({
 					id: ticket.id,
@@ -593,6 +1090,10 @@ export class EventsService {
 
 	private stableJson(value: unknown) {
 		return JSON.stringify(value ?? null);
+	}
+
+	private cloneJson<T>(value: T): T {
+		return JSON.parse(JSON.stringify(value ?? null));
 	}
 
 	private validatePaidMinimum(value: unknown, field: string) {
@@ -803,6 +1304,31 @@ export class EventsService {
 			.trim()
 			.replace(/[^a-z0-9]+/g, '-')
 			.replace(/(^-|-$)+/g, '');
+	}
+
+	private async buildClonedEventTitle(title: string) {
+		const baseTitle = `${title} Copy`;
+		const existing = await this.eventsRepository
+			.createQueryBuilder('event')
+			.where('event.title = :baseTitle OR event.title LIKE :copyPattern', {
+				baseTitle,
+				copyPattern: `${baseTitle} (%)`,
+			})
+			.getMany();
+		if (!existing.length) return baseTitle;
+		return `${baseTitle} (${existing.length + 1})`;
+	}
+
+	private async buildUniqueSlug(baseSlug: string, excludedEventId?: string) {
+		const normalizedBase = baseSlug || `event-${Date.now()}`;
+		let candidate = normalizedBase;
+		let suffix = 2;
+		while (true) {
+			const existing = await this.eventsRepository.findOne({ where: { slug: candidate } });
+			if (!existing || existing.id === excludedEventId) return candidate;
+			candidate = `${normalizedBase}-${suffix}`;
+			suffix += 1;
+		}
 	}
 
 	private generatePrivateAccessToken() {

@@ -1,4 +1,5 @@
 import {
+	Index,
 	Column,
 	CreateDateColumn,
 	Entity,
@@ -10,6 +11,7 @@ import { TicketOrderEntity } from '../../ticket-orders/entities/ticket-order.ent
 import { UserEntity } from '../../auth/entities/user.entity';
 
 @Entity('refund_requests')
+@Index('analytics_refunds_completed_idx', ['completedAt'], { where: "status = 'succeeded'" })
 export class RefundRequestEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;

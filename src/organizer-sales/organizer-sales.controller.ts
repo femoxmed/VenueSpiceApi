@@ -28,9 +28,10 @@ export class OrganizerSalesController {
 		@Query('page') page: string | undefined,
 		@Query('pageSize') pageSize: string | undefined,
 		@Query('search') search: string | undefined,
+		@Query('status') status: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.orders(organizationId, req.user, { page, pageSize, search });
+		return this.organizerSalesService.orders(organizationId, req.user, { page, pageSize, search, status });
 	}
 
 	@Get('orders/:id')
@@ -55,18 +56,20 @@ export class OrganizerSalesController {
 	ticketDetail(
 		@Param('id') id: string,
 		@Query('organizationId') organizationId: string,
+		@Query('status') status: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.ticketDetail(organizationId, id, req.user);
+		return this.organizerSalesService.ticketDetail(organizationId, id, req.user, { status });
 	}
 
 	@Get('merchandise/:id')
 	merchandiseDetail(
 		@Param('id') id: string,
 		@Query('organizationId') organizationId: string,
+		@Query('status') status: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.merchandiseDetail(organizationId, id, req.user);
+		return this.organizerSalesService.merchandiseDetail(organizationId, id, req.user, { status });
 	}
 
 	@Get('balance')

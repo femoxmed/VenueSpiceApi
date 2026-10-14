@@ -80,6 +80,8 @@ export class SupportTicketsService {
 				subject: dto.subject,
 				description: dto.description,
 				status: dto.status || 'open',
+				category: dto.category,
+				priority: dto.priority,
 				request,
 				product,
 				chatThreadId: dto.chatThreadId,

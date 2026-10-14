@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsNumber, IsOptional, Min } from 'class-validator';
+import { IsDateString, IsIn, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateDiscountCouponStatusDto {
@@ -39,4 +39,10 @@ export class UpdateDiscountCouponDto {
 	@IsNumber()
 	@Min(1)
 	maxUses?: number;
+}
+
+export class DeclineDiscountCouponDto {
+	@IsString()
+	@MaxLength(500)
+	reason: string;
 }

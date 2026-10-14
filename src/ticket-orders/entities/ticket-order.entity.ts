@@ -1,4 +1,5 @@
 import {
+	Index,
 	Column,
 	CreateDateColumn,
 	Entity,
@@ -14,6 +15,7 @@ import { TicketOrderItemEntity } from './ticket-order-item.entity';
 import { IssuedTicketEntity } from './issued-ticket.entity';
 
 @Entity('ticket_orders')
+@Index('analytics_orders_paid_idx', ['paidAt', 'organization', 'event'])
 export class TicketOrderEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
@@ -30,6 +32,12 @@ export class TicketOrderEntity {
 		onDelete: 'SET NULL',
 	})
 	referralCode?: ReferralCodeEntity | null;
+
+	@Column({ name: 'analytics_session_id', type: 'uuid', nullable: true })
+	analyticsSessionId?: string | null;
+
+	@Column({ name: 'analytics_visitor_id', type: 'uuid', nullable: true })
+	analyticsVisitorId?: string | null;
 
 	@Column({ name: 'customer_name' })
 	customerName: string;
@@ -90,6 +98,30 @@ export class TicketOrderEntity {
 
 	@Column({ name: 'fee_snapshot', type: 'jsonb', nullable: true })
 	feeSnapshot?: Record<string, unknown> | null;
+
+	@Column({ name: 'tax_provider', type: 'varchar', default: 'none' })
+	taxProvider: 'stripe' | 'organizer' | 'none';
+
+	@Column({ name: 'tax_collection_mode_snapshot', type: 'varchar', nullable: true })
+	taxCollectionModeSnapshot?: string | null;
+
+	@Column({ name: 'tax_responsibility_snapshot', type: 'varchar', nullable: true })
+	taxResponsibilitySnapshot?: string | null;
+
+	@Column({ name: 'tax_rate_snapshot', type: 'decimal', precision: 8, scale: 5, default: 0 })
+	taxRateSnapshot: number;
+
+	@Column({ name: 'tax_label_snapshot', type: 'varchar', nullable: true })
+	taxLabelSnapshot?: string | null;
+
+	@Column({ name: 'event_tax_location_snapshot', type: 'jsonb', nullable: true })
+	eventTaxLocationSnapshot?: Record<string, unknown> | null;
+
+	@Column({ name: 'buyer_billing_address_snapshot', type: 'jsonb', nullable: true })
+	buyerBillingAddressSnapshot?: Record<string, unknown> | null;
+
+	@Column({ name: 'tax_breakdown', type: 'jsonb', nullable: true })
+	taxBreakdown?: Record<string, unknown> | null;
 
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	total: number;

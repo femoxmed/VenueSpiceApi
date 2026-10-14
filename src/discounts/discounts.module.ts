@@ -10,6 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { DiscountsController } from './discounts.controller';
 import { DiscountsService } from './discounts.service';
 import { DiscountCouponEntity } from './entities/discount-coupon.entity';
+import { WithdrawalRequestEntity } from '../organizer-sales/entities/withdrawal-request.entity';
 
 @Module({
 	imports: [
@@ -22,6 +23,7 @@ import { DiscountCouponEntity } from './entities/discount-coupon.entity';
 			UserEntity,
 			TicketOrderEntity,
 			ReferralCodeEntity,
+			WithdrawalRequestEntity,
 		]),
 	],
 	controllers: [DiscountsController],

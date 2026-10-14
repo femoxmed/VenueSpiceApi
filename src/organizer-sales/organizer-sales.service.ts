@@ -15,7 +15,7 @@ import { TicketOrderItemEntity } from '../ticket-orders/entities/ticket-order-it
 import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 
 type SalesUser = { id: string; email?: string; role: Role };
-type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string };
+type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string; status?: string };
 
 type SalesLine = {
 	id: string;
@@ -58,6 +58,7 @@ export class OrganizerSalesService {
 		await this.ensureOrganizationAccess(organizationId, user);
 		const orders = await this.getOrders(organizationId);
 		const paidOrders = orders.filter((order) => order.status === 'paid');
+		const pendingOrders = orders.filter((order) => order.status === 'pending');
 		const refundedOrders = orders.filter((order) => order.status === 'refunded');
 		const lines = paidOrders.flatMap((order) => this.buildOrderLines(order));
 		const balance = await this.getAdjustedBalance(organizationId);
@@ -77,6 +78,12 @@ export class OrganizerSalesService {
 				ticketsSold: this.sum(lines.filter((line) => line.kind === 'ticket'), (line) => line.quantity),
 				merchandiseSold: this.sum(lines.filter((line) => line.kind === 'merchandise'), (line) => line.quantity),
 				orders: paidOrders.length,
+			},
+			activity: {
+				pendingOrders: pendingOrders.length,
+				pendingBuyerPaid: this.sum(pendingOrders, (order) => Number(order.total || 0)),
+				refundedOrders: refundedOrders.length,
+				refundedBuyerPaid: this.sum(refundedOrders, (order) => Number(order.total || 0)),
 			},
 			balance: {
 				pending: balance.pending,
@@ -100,11 +107,12 @@ export class OrganizerSalesService {
 	async orders(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		if (!this.hasPaginationQuery(query)) {
-			const orders = await this.getOrders(organizationId);
+			const orders = this.filterOrdersByStatus(await this.getOrders(organizationId), query.status);
 			return orders.map((order) => this.toOrderRow(order));
 		}
 		await this.ledgerService.syncOrganizationOrders(organizationId);
 		const pagination = this.parsePagination(query);
+		const status = this.normalizeOrderStatus(query.status);
 		const builder = this.ticketOrdersRepository
 			.createQueryBuilder('order')
 			.leftJoinAndSelect('order.organization', 'organization')
@@ -116,6 +124,9 @@ export class OrganizerSalesService {
 			.addOrderBy('order.createdAt', 'DESC')
 			.skip((pagination.page - 1) * pagination.pageSize)
 			.take(pagination.pageSize);
+		if (status) {
+			builder.andWhere('order.status = :status', { status });
+		}
 		if (query.search?.trim()) {
 			const search = `%${query.search.trim()}%`;
 			builder.andWhere(
@@ -168,10 +179,11 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async ticketDetail(organizationId: string, ticketTypeId: string, user: SalesUser) {
+	async ticketDetail(organizationId: string, ticketTypeId: string, user: SalesUser, query: { status?: string } = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		const orders = await this.getOrders(organizationId);
-		const lines = orders.flatMap((order) =>
+		const filteredOrders = this.filterOrdersByStatus(orders, query.status || 'paid');
+		const lines = filteredOrders.flatMap((order) =>
 			this.buildOrderLines(order).filter((line) => line.kind === 'ticket' && line.itemId === ticketTypeId),
 		);
 		const ticketType = await this.ticketTypesRepository.findOne({
@@ -182,8 +194,8 @@ export class OrganizerSalesService {
 			throw new NotFoundException('Ticket not found');
 		}
 		const matchingOrders = lines.length
-			? orders.filter((order) => lines.some((line) => line.id.split(':')[0] === order.id))
-			: orders.filter((order) => order.items.some((item) => item.ticketType?.id === ticketTypeId));
+			? filteredOrders.filter((order) => lines.some((line) => line.id.split(':')[0] === order.id))
+			: filteredOrders.filter((order) => order.items.some((item) => item.ticketType?.id === ticketTypeId));
 		const name = ticketType?.name || lines[0]?.name || 'Ticket';
 		return {
 			ticket: ticketType ?? null,
@@ -193,10 +205,11 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async merchandiseDetail(organizationId: string, merchId: string, user: SalesUser) {
+	async merchandiseDetail(organizationId: string, merchId: string, user: SalesUser, query: { status?: string } = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		const orders = await this.getOrders(organizationId);
-		const lines = orders.flatMap((order) =>
+		const filteredOrders = this.filterOrdersByStatus(orders, query.status || 'paid');
+		const lines = filteredOrders.flatMap((order) =>
 			this.buildOrderLines(order).filter((line) => line.kind === 'merchandise' && line.itemId === merchId),
 		);
 		if (!lines.length) {
@@ -211,7 +224,7 @@ export class OrganizerSalesService {
 		return {
 			merchandiseId: merchId,
 			summary: this.summarizeLines(lines)[0],
-			orders: orders.filter((order) => orderIds.has(order.id)).map((order) => this.toOrderRow(order)),
+			orders: filteredOrders.filter((order) => orderIds.has(order.id)).map((order) => this.toOrderRow(order)),
 			lines,
 		};
 	}
@@ -419,6 +432,9 @@ export class OrganizerSalesService {
 		}
 		const amount = this.roundMoney(Number(request.amount || 0));
 		const currency = request.currency || 'USD';
+		if (request.metadata?.beneficiaryType === 'influencer') {
+			return this.payInfluencerWithdrawalRequest(request, user, amount, currency);
+		}
 		const entries = await this.ledgerService.prepareWithdrawableEntries(
 			organization.id,
 			amount,
@@ -530,6 +546,86 @@ export class OrganizerSalesService {
 		}
 	}
 
+	private async payInfluencerWithdrawalRequest(
+		request: WithdrawalRequestEntity,
+		user: SalesUser,
+		amount: number,
+		currency: string,
+	) {
+		const organization = request.organization;
+		const paidRequests = await this.withdrawalRequestsRepository.find({
+			where: { requestedByUserId: request.requestedByUserId ?? undefined, status: 'paid' },
+		});
+		const sourceIds = new Set(request.sourceEntryIds ?? []);
+		const alreadyPaid = paidRequests.some((paidRequest) =>
+			paidRequest.id !== request.id &&
+			paidRequest.metadata?.beneficiaryType === 'influencer' &&
+			(paidRequest.sourceEntryIds ?? []).some((sourceId) => sourceIds.has(sourceId)),
+		);
+		if (alreadyPaid) {
+			throw new BadRequestException('One or more influencer commissions in this request have already been paid.');
+		}
+		request.status = 'processing';
+		request.reviewedByUserId = user.id;
+		request.reviewedByEmail = user.email;
+		request.reviewedAt = request.reviewedAt ?? new Date();
+		await this.withdrawalRequestsRepository.save(request);
+
+		try {
+			const mock = organization.stripeAccountId!.startsWith('acct_mock_');
+			const transferId = mock
+				? `tr_mock_${Date.now()}`
+				: (await this.createStripeTransfer(
+					organization.stripeAccountId!,
+					amount,
+					currency,
+					organization.id,
+					request.id,
+					'venue_spice_influencer_withdrawal',
+				)).id;
+			request.status = 'paid';
+			request.paidAt = new Date();
+			request.failedAt = null;
+			request.stripeTransferId = transferId;
+			request.metadata = { ...(request.metadata ?? {}), mode: mock ? 'mock' : 'stripe_transfer' };
+			const saved = await this.withdrawalRequestsRepository.save(request);
+			await this.auditService.log(
+				'influencer_withdrawal.paid',
+				user,
+				'withdrawal_request',
+				saved.id,
+				{ amount, currency },
+				{ organizationId: organization.id, stripeTransferId: transferId },
+			);
+			await this.notifyOrganizerPayoutPaid(saved);
+			return saved;
+		} catch (error) {
+			const stripeMessage = error instanceof Error ? error.message : 'Stripe transfer failed.';
+			const adminMessage = this.adminStripeTransferError(stripeMessage);
+			const userMessage = this.userFacingPayoutDelayMessage(stripeMessage);
+			request.status = 'failed';
+			request.failedAt = new Date();
+			request.adminNote = userMessage;
+			request.metadata = {
+				...(request.metadata ?? {}),
+				errorMessage: userMessage,
+				userMessage,
+				adminMessage,
+				stripeErrorMessage: stripeMessage,
+			};
+			await this.withdrawalRequestsRepository.save(request);
+			await this.auditService.log(
+				'influencer_withdrawal.failed',
+				user,
+				'withdrawal_request',
+				request.id,
+				{ amount, currency, errorMessage: adminMessage },
+				{ organizationId: organization.id },
+			);
+			throw new BadRequestException(adminMessage);
+		}
+	}
+
 	async getStripePlatformBalance() {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
 		if (!secretKey) {
@@ -620,7 +716,14 @@ export class OrganizerSalesService {
 		return this.roundMoney(requests.reduce((sum, request) => sum + Number(request.amount || 0), 0));
 	}
 
-	private async createStripeTransfer(accountId: string, amount: number, currency: string, organizationId: string, withdrawalRequestId?: string) {
+	private async createStripeTransfer(
+		accountId: string,
+		amount: number,
+		currency: string,
+		organizationId: string,
+		withdrawalRequestId?: string,
+		source = 'venue_spice_organizer_withdrawal',
+	) {
 		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
 		if (!secretKey) {
 			throw new BadRequestException('Stripe is not configured on this server.');
@@ -630,7 +733,7 @@ export class OrganizerSalesService {
 		params.set('currency', currency.toLowerCase());
 		params.set('destination', accountId);
 		params.set('metadata[organizationId]', organizationId);
-		params.set('metadata[source]', 'venue_spice_organizer_withdrawal');
+		params.set('metadata[source]', source);
 		if (withdrawalRequestId) params.set('metadata[withdrawalRequestId]', withdrawalRequestId);
 
 		const response = await fetch('https://api.stripe.com/v1/transfers', {
@@ -664,7 +767,21 @@ export class OrganizerSalesService {
 	}
 
 	private hasPaginationQuery(query: PaginationQuery) {
-		return Boolean(query.page ?? query.pageSize ?? query.search);
+		return Boolean(query.page ?? query.pageSize ?? query.search ?? query.status);
+	}
+
+	private normalizeOrderStatus(status?: string) {
+		const normalized = String(status || '').trim().toLowerCase();
+		if (!normalized || normalized === 'all') return undefined;
+		if (['pending', 'paid', 'cancelled', 'refunded'].includes(normalized)) {
+			return normalized as TicketOrderEntity['status'];
+		}
+		return undefined;
+	}
+
+	private filterOrdersByStatus(orders: TicketOrderEntity[], status?: string) {
+		const normalized = this.normalizeOrderStatus(status);
+		return normalized ? orders.filter((order) => order.status === normalized) : orders;
 	}
 
 	private paginated<T>(items: T[], total: number, page: number, pageSize: number) {

@@ -18,6 +18,8 @@ export type PricingSettings = {
 	stripeAutomaticTaxEnabled: boolean;
 	stripeTaxCode: string;
 	stripeTaxBehavior: 'exclusive' | 'inclusive' | 'unspecified';
+	supportedTaxRegions: string;
+	allowOrganizerManualTax: boolean;
 };
 
 const settingMap = {
@@ -30,6 +32,8 @@ const settingMap = {
 	stripeAutomaticTaxEnabled: 'STRIPE_AUTOMATIC_TAX_ENABLED',
 	stripeTaxCode: 'STRIPE_TAX_CODE',
 	stripeTaxBehavior: 'STRIPE_TAX_BEHAVIOR',
+	supportedTaxRegions: 'SUPPORTED_TAX_REGIONS',
+	allowOrganizerManualTax: 'ALLOW_ORGANIZER_MANUAL_TAX',
 } satisfies Record<keyof PricingSettings, string>;
 
 const defaults = {
@@ -42,6 +46,8 @@ const defaults = {
 	stripeAutomaticTaxEnabled: true,
 	stripeTaxCode: '',
 	stripeTaxBehavior: 'exclusive',
+	supportedTaxRegions: 'US:TX',
+	allowOrganizerManualTax: true,
 } satisfies PricingSettings;
 
 const descriptions: Record<string, string> = {
@@ -54,6 +60,8 @@ const descriptions: Record<string, string> = {
 	STRIPE_AUTOMATIC_TAX_ENABLED: 'Enable Stripe Automatic Tax for ticket checkout sessions.',
 	STRIPE_TAX_CODE: 'Optional Stripe tax code applied to ticket products, e.g. txcd_*. Leave blank to use Stripe defaults.',
 	STRIPE_TAX_BEHAVIOR: 'Stripe price tax behavior for checkout line items: exclusive, inclusive, or unspecified.',
+	SUPPORTED_TAX_REGIONS: 'Comma-separated country/state regions where Venue Spice collects tax, e.g. US:TX.',
+	ALLOW_ORGANIZER_MANUAL_TAX: 'Allow organizers outside supported tax regions to enter a tax rate after accepting responsibility.',
 };
 
 @Injectable()
@@ -115,6 +123,8 @@ export class PlatformSettingsService implements OnModuleInit {
 			stripeAutomaticTaxEnabled: this.booleanValue(byKey.get(settingMap.stripeAutomaticTaxEnabled), defaults.stripeAutomaticTaxEnabled),
 			stripeTaxCode: byKey.get(settingMap.stripeTaxCode) ?? defaults.stripeTaxCode,
 			stripeTaxBehavior: this.taxBehaviorValue(byKey.get(settingMap.stripeTaxBehavior), defaults.stripeTaxBehavior),
+			supportedTaxRegions: byKey.get(settingMap.supportedTaxRegions) ?? defaults.supportedTaxRegions,
+			allowOrganizerManualTax: this.booleanValue(byKey.get(settingMap.allowOrganizerManualTax), defaults.allowOrganizerManualTax),
 		};
 	}
 

@@ -141,6 +141,27 @@ export class OrganizationEntity {
 	@Column({ name: 'deal_ends_at', type: 'timestamptz', nullable: true })
 	dealEndsAt?: Date | null;
 
+	@Column({ name: 'payout_policy', type: 'varchar', default: 'platform_default' })
+	payoutPolicy: 'platform_default' | 'after_payment' | 'after_event';
+
+	@Column({ name: 'payout_delay_days', type: 'int', nullable: true })
+	payoutDelayDays?: number | null;
+
+	@Column({ name: 'payout_policy_starts_at', type: 'timestamptz', nullable: true })
+	payoutPolicyStartsAt?: Date | null;
+
+	@Column({ name: 'payout_policy_ends_at', type: 'timestamptz', nullable: true })
+	payoutPolicyEndsAt?: Date | null;
+
+	@Column({ name: 'payout_policy_reason', type: 'text', nullable: true })
+	payoutPolicyReason?: string | null;
+
+	@Column({ name: 'payout_policy_refund_risk_accepted_at', type: 'timestamptz', nullable: true })
+	payoutPolicyRefundRiskAcceptedAt?: Date | null;
+
+	@Column({ name: 'payout_policy_refund_risk_accepted_by', type: 'uuid', nullable: true })
+	payoutPolicyRefundRiskAcceptedBy?: string | null;
+
 	@OneToMany(() => EventEntity, (event) => event.organization)
 	events: EventEntity[];
 

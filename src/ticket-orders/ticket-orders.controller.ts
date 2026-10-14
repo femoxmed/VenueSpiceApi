@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Request } from 'express';
+import { UserEntity } from '../auth/entities/user.entity';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
@@ -46,10 +48,18 @@ export class TicketOrdersController {
 
 	@ApiBearerAuth()
 	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Post('stripe/reconcile-pending')
+	reconcilePendingStripeOrders(@Req() req: Request & { user: UserEntity }) {
+		return this.ticketOrdersService.reconcilePendingStripeOrders(req.user);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN, Role.ORG_STAFF)
 	@Get()
-	findAll() {
-		return this.ticketOrdersService.findAll();
+	findAll(@Query('status') status?: string) {
+		return this.ticketOrdersService.findAll({ status });
 	}
 
 	@ApiBearerAuth()

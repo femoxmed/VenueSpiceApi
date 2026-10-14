@@ -1,4 +1,5 @@
 import {
+	Index,
 	Column,
 	CreateDateColumn,
 	Entity,
@@ -13,6 +14,7 @@ import { ServiceBookingEntity } from '../../service-bookings/entities/service-bo
 import { CrmRecordEntity } from '../../crm/entities/crm-record.entity';
 
 @Entity('users')
+@Index('analytics_users_created_idx', ['createdAt'])
 export class UserEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;

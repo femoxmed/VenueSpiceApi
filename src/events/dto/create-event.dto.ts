@@ -118,6 +118,10 @@ export class CreateEventDto {
 
 	@IsOptional()
 	@IsString()
+	venuePostalCode?: string;
+
+	@IsOptional()
+	@IsString()
 	timezone?: string;
 
 	@IsOptional()
@@ -184,6 +188,52 @@ export class CreateEventDto {
 	@Min(0)
 	@Max(100)
 	refundablePercentage?: number;
+
+	@IsOptional()
+	@IsBoolean()
+	dateChangeConfirmed?: boolean;
+
+	@IsOptional()
+	@IsString()
+	dateChangeReason?: string;
+
+	@IsOptional()
+	@IsIn(['stripe_tax', 'organizer_manual', 'none'])
+	taxCollectionMode?: 'stripe_tax' | 'organizer_manual' | 'none';
+
+	@IsOptional()
+	@IsIn(['venue_spice', 'organizer'])
+	taxResponsibility?: 'venue_spice' | 'organizer';
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	@Max(100)
+	organizerTaxRate?: number;
+
+	@IsOptional()
+	@IsString()
+	organizerTaxLabel?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	organizerTaxPermitConfirmed?: boolean;
+
+	@IsOptional()
+	@IsString()
+	organizerTaxConsentText?: string;
+
+	@IsOptional()
+	@IsBoolean()
+	venueAddressTaxConfirmed?: boolean;
+
+	@IsOptional()
+	@IsString()
+	venueAddressTaxConsentText?: string;
+
+	@IsOptional()
+	@IsString()
+	taxCode?: string;
 
 	@IsOptional()
 	@IsArray()
