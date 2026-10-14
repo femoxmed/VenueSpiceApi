@@ -35,7 +35,10 @@ export class TicketOrdersController {
 
 	@Post('stripe/webhook')
 	handleStripeWebhook(@Body() payload: any, @Req() req: Request & { rawBody?: Buffer }) {
-        verifyStripeWebhook(req.rawBody, req.get('stripe-signature'), this.config.get<string>('STRIPE_WEBHOOK_SECRET'));
+		// Only an explicit lowercase false enables the temporary production override.
+		if (this.config.get<string>('STRIPE_WEBHOOK_VERIFY_SIGNATURE', 'true') !== 'false') {
+			verifyStripeWebhook(req.rawBody, req.get('stripe-signature'), this.config.get<string>('STRIPE_WEBHOOK_SECRET'));
+		}
 		return this.ticketOrdersService.handleStripeWebhook(payload);
 	}
 
