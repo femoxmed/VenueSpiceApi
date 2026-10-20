@@ -191,6 +191,28 @@ export class TicketOrdersService {
         }));
     }
 
+	async userPurchaseHistory(userId: string, page = 1) {
+		if (!await this.usersRepository.exist({ where: { id: userId } })) throw new NotFoundException('User not found');
+		const pageSize = 20;
+		const [orders, total] = await this.ticketOrdersRepository.findAndCount({
+			where: { buyerUserId: userId },
+			relations: { items: true },
+			order: { createdAt: 'DESC', id: 'DESC' },
+			take: pageSize,
+			skip: (page - 1) * pageSize,
+		});
+		return {
+			page, pageSize, total,
+			orders: orders.map(order => ({
+				id: order.id, createdAt: order.createdAt, status: order.status,
+				event: { id: order.event.id, title: order.event.title },
+				currency: order.currency, total: order.total, tax: order.tax,
+				customerName: order.customerName, customerEmail: order.customerEmail, customerPhone: order.customerPhone,
+				items: (order.items || []).map(item => ({ name: item.ticketName, quantity: item.quantity })),
+			})),
+		};
+	}
+
     async claimPreviousOrders(user: { id: string; email: string; emailProofAt?: number }) {
         if (!user.emailProofAt || Date.now() - user.emailProofAt > 600000) throw new ForbiddenException('Verify your email with a new sign-in code before claiming previous purchases.');
         const result = await this.ticketOrdersRepository.createQueryBuilder().update(TicketOrderEntity)

@@ -2,7 +2,7 @@ import { BuyerProfileDto } from './dto/buyer-profile.dto';
 import { BuyerAuthGuard, OptionalBuyerAuthGuard } from '../common/guards/buyer-auth.guard';
 import { ConfigService } from '@nestjs/config';
 import { verifyStripeWebhook } from './stripe-webhook-signature';
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { UserEntity } from '../auth/entities/user.entity';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
@@ -35,6 +35,15 @@ export class TicketOrdersController {
     @Post('mine/claim') claim(@Req() req: { user: UserEntity & { emailProofAt?: number } }) { return this.ticketOrdersService.claimPreviousOrders(req.user); }
     @UseGuards(JwtAuthGuard)
     @Get('customers') customers(@Req() req: { user: UserEntity }, @Query('organizationId') organizationId?: string, @Query('email') email?: string, @Query('page') page?: string) { return this.ticketOrdersService.customerDirectory(req.user, organizationId, email, Math.max(1, parseInt(page || '1') || 1)); }
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Get('customers/:userId/orders')
+	userPurchaseHistory(@Param('userId', new ParseUUIDPipe()) userId: string, @Query('page') page?: string) {
+		const requestedPage = Number(page || 1);
+		return this.ticketOrdersService.userPurchaseHistory(userId, Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1);
+	}
 
 	@Post('fee-preview')
 	previewCheckoutFees(@Body() dto: PreviewCheckoutFeesDto) {

@@ -96,6 +96,17 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
  await assert.rejects(()=>orders.customerDirectory({id:id(11),role:'org_admin'},otherOrg.id),/cannot view/);
  await assert.rejects(()=>orders.customerDirectory({id:first.user.id,role:'customer'}),/Select an organization/);
  assert.equal((await orders.customerDirectory({id:id(10),role:'super_admin'})).length,2);
+ // Profile history is scoped by account ID, including after email changes; matching guest emails do not grant ownership.
+ await db.getRepository(Order).save({event,organization:org,buyerUserId:id(11),customerName:'Other Account',customerEmail:first.user.email,total:25,subtotal:25,status:'paid',currency:'USD'});
+ await db.getRepository(Order).save({event,organization:org,customerName:'Unclaimed Guest',customerEmail:first.user.email,total:25,subtotal:25,status:'paid',currency:'USD'});
+ await db.getRepository(User).update(first.user.id,{email:'changed@example.invalid'});
+ const history=await orders.userPurchaseHistory(first.user.id);assert.equal(history.total,2);assert.equal(history.orders.length,2);assert.equal(history.orders.find(x=>x.id===order.id).customerName,'Buyer Snapshot');assert.equal(history.orders.find(x=>x.id===order.id).customerEmail,first.user.email);
+ assert.equal((await orders.userPurchaseHistory(id(12))).total,0);
+ await assert.rejects(()=>orders.userPurchaseHistory(id(999)),/User not found/);
+ await db.getRepository(Order).save(Array.from({length:21},(_,i)=>({event,organization:org,buyerUserId:first.user.id,customerName:'History',customerEmail:'changed@example.invalid',total:i,subtotal:i,tax:0,status:i%2?'refunded':'cancelled',currency:i%2?'USD':'GBP'})));
+ const historyPage1=await orders.userPurchaseHistory(first.user.id),historyPage2=await orders.userPurchaseHistory(first.user.id,2);
+ assert.equal(historyPage1.total,23);assert.equal(historyPage1.orders.length,20);assert.equal(historyPage2.orders.length,3);assert.equal(new Set([...historyPage1.orders,...historyPage2.orders].map(x=>x.id)).size,23);
+ assert.ok(historyPage1.orders.some(x=>x.status==='refunded'));assert.ok(historyPage1.orders.some(x=>x.currency==='GBP'));
  // Exercise real HTTP guards, DTO validation and token scopes on a localhost-only Nest app.
  const {Module,ValidationPipe}=require('@nestjs/common'),{NestFactory}=require('@nestjs/core'),{ConfigService}=require('@nestjs/config');
  const {PassportModule}=require('@nestjs/passport');
@@ -112,6 +123,14 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
   assert.equal((await call('/ticket-orders/mine')).status,401);
   assert.equal((await call('/ticket-orders/customers',first.accessToken)).status,401);
   const adminToken=jwt.sign({sub:id(10)});assert.equal((await call('/ticket-orders/customers',adminToken)).status,200);
+  const historyRoute=`/ticket-orders/customers/${first.user.id}/orders`;
+  assert.equal((await call(historyRoute)).status,401);
+  assert.equal((await call(historyRoute,first.accessToken)).status,401);
+  assert.equal((await call(historyRoute,jwt.sign({sub:id(11)}))).status,403);
+  const historyResponse=await call(historyRoute+'?page=2',adminToken);assert.equal(historyResponse.status,200);assert.equal((await historyResponse.json()).orders.length,3);
+  assert.equal((await call('/ticket-orders/customers/not-a-uuid/orders',adminToken)).status,400);
+  assert.equal((await call(`/ticket-orders/customers/${id(999)}/orders`,adminToken)).status,404);
+
   assert.equal((await call('/ticket-orders/buyer-profile',first.accessToken,{fullName:'Buyer',phone:'bad'})).status,400);
   assert.equal((await call('/ticket-orders/buyer-profile',first.accessToken,{fullName:'Buyer',phone:'+12025550123',role:'admin'})).status,400);
   const body={eventId:event.id,customerName:'Buyer',customerEmail:first.user.email,termsAccepted:true};
@@ -136,6 +155,6 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
  await db.query('ALTER TABLE users DROP COLUMN customer_terms_accepted_at');
  await db.query('DROP TABLE buyer_login_challenges, buyer_login_limits');
  const migration=fs.readFileSync(path.join(__dirname,'../sql/20261020-buyer-checkout.sql'),'utf8');await db.query(migration);await db.query(migration);await db.synchronize();assert.equal(await db.getRepository(Order).count(),before);
- console.log('Buyer integration passed: free-order linkage, idempotent SQL alternative, HTTP guards and DTOs, legacy-schema upgrade, verification bypass regression, new/existing roles, scopes and refresh, hashed expiring single-use codes, persisted attempt/send limits, concurrent verification, inactive users, required auth/phone, trusted buyer snapshots, guest rollout, ownership, verified claims, tenant-scoped customers, repeat synchronization.');
+ console.log('Buyer integration passed: admin profile history, account/email isolation, pagination and HTTP role guards, free-order linkage, idempotent SQL alternative, HTTP guards and DTOs, legacy-schema upgrade, verification bypass regression, new/existing roles, scopes and refresh, hashed expiring single-use codes, persisted attempt/send limits, concurrent verification, inactive users, required auth/phone, trusted buyer snapshots, guest rollout, ownership, verified claims, tenant-scoped customers, repeat synchronization.');
  }finally{if(db.isInitialized)await db.destroy();await client.query(`DROP SCHEMA ${schema} CASCADE`);await client.end();}
 })().catch(e=>{console.error(e);process.exitCode=1;});
