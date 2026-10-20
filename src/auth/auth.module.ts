@@ -1,3 +1,7 @@
+import { BuyerAuthService } from './buyer-auth.service';
+import { BuyerAuthController } from './buyer-auth.controller';
+import { BuyerJwtStrategy } from './buyer-jwt.strategy';
+import { BuyerLoginChallengeEntity, BuyerLoginLimitEntity } from './entities/buyer-login.entity';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
@@ -20,7 +24,7 @@ import { AuditModule } from '../audit/audit.module';
     NotificationsModule,
     CartModule,
     AuditModule,
-    TypeOrmModule.forFeature([UserEntity, PasswordResetRecordEntity, OrganizationEntity]),
+    TypeOrmModule.forFeature([BuyerLoginChallengeEntity, BuyerLoginLimitEntity, UserEntity, PasswordResetRecordEntity, OrganizationEntity]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -32,8 +36,8 @@ import { AuditModule } from '../audit/audit.module';
       }),
     }),
   ],
-  controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  controllers: [AuthController, BuyerAuthController],
+  providers: [AuthService, JwtStrategy, BuyerJwtStrategy, BuyerAuthService],
   exports: [AuthService],
 })
 export class AuthModule {}

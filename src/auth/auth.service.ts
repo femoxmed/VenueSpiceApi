@@ -83,7 +83,6 @@ export class AuthService {
 
 		if (this.requiresAdminOtp(user.role)) {
 			const code = this.generateVerificationCode();
-			console.log(`[TEMP ADMIN OTP] ${user.email}: ${code}`);
 			user.adminOtpCodeHash = await bcrypt.hash(code, 10);
 			user.adminOtpExpiresAt = this.getVerificationExpiry();
 			await this.usersRepository.save(user);
@@ -154,7 +153,7 @@ export class AuthService {
 			throw new UnauthorizedException('Refresh token is required');
 		}
 
-		let payload: { sub: string; type?: string };
+		let payload: { sub: string; type?: string; scope?: string; emailProofAt?: number };
 		try {
 			payload = this.jwtService.verify(refreshToken, {
 				secret: this.configService.get<string>('JWT_REFRESH_SECRET') ||
@@ -177,9 +176,9 @@ export class AuthService {
 		}
 
 		return {
-			accessToken: this.signAccessToken(user),
-			refreshToken: this.signRefreshToken(user),
-			user: this.toSafeUser(user),
+			accessToken: this.signAccessToken(user, payload.scope, payload.emailProofAt),
+			refreshToken: this.signRefreshToken(user, payload.scope, payload.emailProofAt),
+			user: { ...this.toSafeUser(user), sessionScope: payload.scope },
 		};
 	}
 
@@ -318,13 +317,8 @@ export class AuthService {
 			throw new NotFoundException('User not found');
 		}
 
-		if (user.verifiedAt) {
-			return {
-				accessToken: this.signAccessToken(user),
-				refreshToken: this.signRefreshToken(user),
-				user: this.toSafeUser(user),
-				message: 'Account already verified',
-			};
+		if (!user.isActive || user.verifiedAt) {
+			throw new BadRequestException('Account cannot be verified here. Please sign in.');
 		}
 
 		if (
@@ -631,21 +625,22 @@ export class AuthService {
 		};
 	}
 
-	private signAccessToken(user: UserEntity) {
+	private signAccessToken(user: UserEntity, scope?: string, emailProofAt?: number) {
 		return this.jwtService.sign({
 			sub: user.id,
+			scope, emailProofAt,
 			email: user.email,
 			phone: user.phone,
 			role: user.role,
 		});
 	}
 
-	private signRefreshToken(user: UserEntity) {
+	private signRefreshToken(user: UserEntity, scope?: string, emailProofAt?: number) {
 		return this.jwtService.sign(
 			{
 				sub: user.id,
 				email: user.email,
-				type: 'refresh',
+				type: 'refresh', scope, emailProofAt,
 			},
 			{
 				secret:

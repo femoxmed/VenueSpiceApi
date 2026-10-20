@@ -19,6 +19,9 @@ export class UserEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
 
+	@Column({ name: 'customer_terms_accepted_at', type: 'timestamptz', nullable: true })
+	customerTermsAcceptedAt?: Date | null;
+
 	@Column({ name: 'full_name' })
 	fullName: string;
 

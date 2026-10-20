@@ -1,3 +1,4 @@
+import { BuyerAuthGuard } from '../common/guards/buyer-auth.guard';
 import {
 	Body,
 	Controller,
@@ -71,7 +72,7 @@ export class AuthController {
 	}
 
 	@ApiBearerAuth()
-	@UseGuards(JwtAuthGuard)
+	@UseGuards(BuyerAuthGuard)
 	@Get('me')
 	me(@Req() req: { user: unknown }) {
 		return req.user;

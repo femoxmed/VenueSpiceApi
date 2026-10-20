@@ -1,3 +1,5 @@
+import { isPhoneNumber } from 'class-validator';
+import { UnauthorizedException, ForbiddenException } from '@nestjs/common';
 import { AnalyticsDisputeEntity } from '../analytics/entities/analytics-dispute.entity';
 import {
 	BadRequestException,
@@ -165,6 +167,54 @@ export class TicketOrdersService {
 		return order;
 	}
 
+
+    checkoutRequirements() {
+        return { accountRequired: this.configService.get<string>('CHECKOUT_ACCOUNT_REQUIRED', 'false') === 'true' };
+    }
+
+    async buyerProfile(userId: string, dto: { fullName: string; phone: string }) {
+        const user = await this.usersRepository.findOneBy({ id: userId, isActive: true });
+        if (!user) throw new UnauthorizedException();
+        if (dto.fullName.trim().length < 2 || !isPhoneNumber(dto.phone)) throw new BadRequestException('Enter your full name and a valid phone number.');
+        await this.usersRepository.update(userId, { fullName: dto.fullName.trim(), phone: dto.phone });
+        return { fullName: dto.fullName.trim(), phone: dto.phone };
+    }
+
+    async myOrders(userId: string, page = 1) {
+        const orders = await this.ticketOrdersRepository.find({ where: { buyerUserId: userId }, relations: { items: true, tickets: true }, order: { createdAt: 'DESC' }, take: 20, skip: (Math.max(1, page) - 1) * 20 });
+        return orders.map(order => ({
+            id: order.id, status: order.status, currency: order.currency, total: order.total, createdAt: order.createdAt,
+            customerName: order.customerName, customerEmail: order.customerEmail, customerPhone: order.customerPhone,
+            event: { title: order.event.title, startsAt: order.event.startsAt, timezone: order.event.timezone },
+            items: (order.items || []).map(item => ({ name: item.ticketName, quantity: item.quantity })),
+            tickets: order.status === 'paid' ? (order.tickets || []).map(ticket => ({ id: ticket.id, code: ticket.code, holderName: ticket.holderName, status: ticket.status })) : [],
+        }));
+    }
+
+    async claimPreviousOrders(user: { id: string; email: string; emailProofAt?: number }) {
+        if (!user.emailProofAt || Date.now() - user.emailProofAt > 600000) throw new ForbiddenException('Verify your email with a new sign-in code before claiming previous purchases.');
+        const result = await this.ticketOrdersRepository.createQueryBuilder().update(TicketOrderEntity)
+            .set({ buyerUserId: user.id }).where('buyer_user_id IS NULL').andWhere('LOWER(customer_email) = :email', { email: user.email.toLowerCase() }).execute();
+        return { claimed: result.affected || 0 };
+    }
+
+    async customerDirectory(user: { id: string; role: Role }, organizationId?: string, email?: string, page = 1) {
+        const admin = [Role.ADMIN, Role.SUPER_ADMIN, Role.PLATFORM_ADMIN].includes(user.role);
+        if (!admin && !organizationId) throw new ForbiddenException('Select an organization.');
+        if (!admin) {
+            const organization = await this.ticketOrdersRepository.manager.getRepository(OrganizationEntity).findOneBy({ id: organizationId! });
+            const member = await this.organizationMembersRepository.findOneBy({ organizationId: organizationId!, userId: user.id, status: 'active' });
+            if (!organization || (organization.ownerUserId !== user.id && !member)) throw new ForbiddenException('You cannot view these customers.');
+        }
+        const params: unknown[] = []; const conditions: string[] = [];
+        if (organizationId) { params.push(organizationId); conditions.push(`o."organizationId" = $${params.length}`); }
+        if (email) { params.push(email.trim().toLowerCase()); conditions.push(`LOWER(o.customer_email) = $${params.length}`); }
+        const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+        params.push(50, (Math.max(1, page) - 1) * 50);
+        if (email) return this.ticketOrdersRepository.manager.query(`SELECT o.id, o.customer_name AS name, o.customer_email AS email, o.customer_phone AS phone, o.buyer_user_id AS "buyerUserId", o.status, o.currency, o.total, o.created_at AS "createdAt", e.title AS event FROM ticket_orders o JOIN events e ON e.id=o."eventId" ${where} ORDER BY o.created_at DESC LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+        return this.ticketOrdersRepository.manager.query(`SELECT LOWER(o.customer_email) AS email, (array_agg(o.customer_name ORDER BY o.created_at DESC))[1] AS name, (array_agg(o.customer_phone ORDER BY o.created_at DESC))[1] AS phone, (array_agg(o.buyer_user_id ORDER BY o.created_at DESC))[1] AS "buyerUserId", o.currency, COUNT(*) FILTER (WHERE o.status='paid')::int AS "paidOrders", COALESCE(SUM(o.total) FILTER (WHERE o.status='paid'),0) AS "paidTotal", MAX(o.created_at) AS "lastPurchase" FROM ticket_orders o ${where} GROUP BY LOWER(o.customer_email),o.currency ORDER BY MAX(o.created_at) DESC LIMIT $${params.length-1} OFFSET $${params.length}`, params);
+    }
+
 	async findMyTicket(dto: FindMyTicketDto) {
 		const email = dto.email.toLowerCase().trim();
 		const orders = await this.ticketOrdersRepository
@@ -215,7 +265,16 @@ export class TicketOrdersService {
 		};
 	}
 
-	async createCheckoutSession(dto: CreateCheckoutSessionDto) {
+	async createCheckoutSession(dto: CreateCheckoutSessionDto, buyer?: { id: string }) {
+        const accountRequired = this.configService.get<string>('CHECKOUT_ACCOUNT_REQUIRED', 'false') === 'true';
+        if (accountRequired && !buyer) throw new UnauthorizedException('Sign in to buy tickets.');
+        let buyerUser: UserEntity | null = null;
+        if (buyer) {
+            buyerUser = await this.usersRepository.findOneBy({ id: buyer.id, isActive: true });
+            if (!buyerUser || !buyerUser.verifiedAt) throw new UnauthorizedException('Verify your email before buying tickets.');
+            if (!buyerUser.fullName.trim() || !buyerUser.phone || !isPhoneNumber(buyerUser.phone)) throw new BadRequestException('Complete your name and valid phone number before checkout.');
+            dto = { ...dto, customerName: buyerUser.fullName, customerEmail: buyerUser.email, customerPhone: buyerUser.phone };
+        }
 		if (!dto.termsAccepted) {
 			throw new BadRequestException('Accept the checkout terms to continue.');
 		}
@@ -249,6 +308,7 @@ export class TicketOrdersService {
 		const order = await this.ticketOrdersRepository.save(
 			this.ticketOrdersRepository.create({
 				event,
+				buyerUserId: buyerUser?.id || null,
 				organization: event.organization,
 				referralCode,
 				analyticsSessionId: dto.analyticsSessionId || null,

@@ -17,6 +17,9 @@ async function bootstrap() {
 	const app = await NestFactory.create(AppModule, { rawBody: true });
 	const configService = app.get(ConfigService);
 	const apiPrefix = configService.get<string>('API_PREFIX', 'api');
+	const trustedProxyHops = Number(configService.get<string>('AUTH_TRUST_PROXY_HOPS', '0'));
+	if (!Number.isInteger(trustedProxyHops) || trustedProxyHops < 0 || trustedProxyHops > 5) throw new Error('AUTH_TRUST_PROXY_HOPS must be an integer between 0 and 5');
+	if (trustedProxyHops) app.getHttpAdapter().getInstance().set('trust proxy', trustedProxyHops);
 
 	// Enable CORS properly
 	app.enableCors({

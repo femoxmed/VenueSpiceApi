@@ -1,3 +1,4 @@
+import { BuyerLoginChallengeEntity, BuyerLoginLimitEntity } from './auth/entities/buyer-login.entity';
 import { AnalyticsDisputeEntity } from './analytics/entities/analytics-dispute.entity';
 import { AnalyticsModule } from './analytics/analytics.module';
 import { AnalyticsEventEntity } from './analytics/entities/analytics-event.entity';
@@ -123,7 +124,7 @@ function getBullQueuePrefix(value?: string | null) {
 				synchronize:
 					configService.get<string>('DB_SYNCHRONIZE', 'true') === 'true',
 				autoLoadEntities: false,
-				entities: [
+				entities: [BuyerLoginChallengeEntity, BuyerLoginLimitEntity,
                     AnalyticsDisputeEntity,
 					AnalyticsEventEntity,
 					UserEntity,

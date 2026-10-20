@@ -1,3 +1,5 @@
+import { UserEntity } from '../../auth/entities/user.entity';
+import { JoinColumn } from 'typeorm';
 import {
 	Index,
 	Column,
@@ -20,6 +22,14 @@ import { IssuedTicketEntity } from './issued-ticket.entity';
 export class TicketOrderEntity {
 	@PrimaryGeneratedColumn('uuid')
 	id: string;
+
+	@Index('ticket_orders_buyer_user_idx')
+	@Column({ name: 'buyer_user_id', type: 'uuid', nullable: true })
+	buyerUserId?: string | null;
+
+	@ManyToOne(() => UserEntity, { nullable: true, onDelete: 'SET NULL' })
+	@JoinColumn({ name: 'buyer_user_id', foreignKeyConstraintName: 'ticket_orders_buyer_user_fk' })
+	buyer?: UserEntity | null;
 
 	@ManyToOne(() => OrganizationEntity, { eager: true, onDelete: 'RESTRICT' })
 	organization: OrganizationEntity;

@@ -1,3 +1,5 @@
+import { BuyerProfileDto } from './dto/buyer-profile.dto';
+import { BuyerAuthGuard, OptionalBuyerAuthGuard } from '../common/guards/buyer-auth.guard';
 import { ConfigService } from '@nestjs/config';
 import { verifyStripeWebhook } from './stripe-webhook-signature';
 import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
@@ -18,10 +20,21 @@ import { TicketOrdersService } from './ticket-orders.service';
 export class TicketOrdersController {
 	constructor(private readonly ticketOrdersService: TicketOrdersService, private readonly config: ConfigService) {}
 
+	@UseGuards(OptionalBuyerAuthGuard)
 	@Post('checkout')
-	createCheckoutSession(@Body() dto: CreateCheckoutSessionDto) {
-		return this.ticketOrdersService.createCheckoutSession(dto);
+	createCheckoutSession(@Body() dto: CreateCheckoutSessionDto, @Req() req: { user?: UserEntity }) {
+		return this.ticketOrdersService.createCheckoutSession(dto, req.user);
 	}
+
+    @Get('checkout-requirements') requirements() { return this.ticketOrdersService.checkoutRequirements(); }
+    @UseGuards(BuyerAuthGuard)
+    @Get('mine') mine(@Req() req: { user: UserEntity }, @Query('page') page?: string) { return this.ticketOrdersService.myOrders(req.user.id, Math.max(1, parseInt(page || '1') || 1)); }
+    @UseGuards(BuyerAuthGuard)
+    @Post('buyer-profile') profile(@Req() req: { user: UserEntity }, @Body() dto: BuyerProfileDto) { return this.ticketOrdersService.buyerProfile(req.user.id, dto); }
+    @UseGuards(BuyerAuthGuard)
+    @Post('mine/claim') claim(@Req() req: { user: UserEntity & { emailProofAt?: number } }) { return this.ticketOrdersService.claimPreviousOrders(req.user); }
+    @UseGuards(JwtAuthGuard)
+    @Get('customers') customers(@Req() req: { user: UserEntity }, @Query('organizationId') organizationId?: string, @Query('email') email?: string, @Query('page') page?: string) { return this.ticketOrdersService.customerDirectory(req.user, organizationId, email, Math.max(1, parseInt(page || '1') || 1)); }
 
 	@Post('fee-preview')
 	previewCheckoutFees(@Body() dto: PreviewCheckoutFeesDto) {
