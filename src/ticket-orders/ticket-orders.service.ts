@@ -447,6 +447,9 @@ export class TicketOrdersService {
 		const discountCoupon = normalizedReferralCode
 			? await this.ensureDiscountCouponCanBeUsed(normalizedReferralCode, event)
 			: null;
+		if (normalizedReferralCode && !discountCoupon && !referralCode) {
+			throw new BadRequestException('This discount or referral code was not found. Check the code and try again.');
+		}
 		if (discountCoupon && !referralCode) {
 			referralCode = await this.ensureReferralCodeForDiscountCoupon(discountCoupon);
 		}
@@ -1314,7 +1317,7 @@ export class TicketOrdersService {
 			throw new BadRequestException('This discount code has expired.');
 		}
 		if (startsAt && startsAt > now) {
-			throw new BadRequestException('This discount code is not active yet.');
+			throw new BadRequestException(`This discount code is not active yet. It starts ${startsAt.toUTCString()}.`);
 		}
 		if (coupon.status === 'expired') {
 			throw new BadRequestException('This discount code has expired.');
@@ -1332,7 +1335,7 @@ export class TicketOrdersService {
 			!coupon.agent?.user ||
 			!coupon.agent.user.isActive
 		) {
-			throw new BadRequestException('This discount code is not ready to use yet.');
+			throw new BadRequestException('This discount code is not ready to use yet. The promoter must complete account setup and accept the campaign.');
 		}
 		if (coupon.maxUses !== null && coupon.maxUses !== undefined && coupon.usesCount >= coupon.maxUses) {
 			throw new BadRequestException('This discount code has reached its usage limit.');

@@ -222,7 +222,7 @@ export class AgentsService {
 				rows: [
 					{ label: 'Event', value: event.title },
 					{ label: 'Organizer', value: organizationName },
-					{ label: 'Starts', value: event.startsAt },
+					{ label: 'Event date', value: event.startsAt },
 					{ label: 'Location', value: location },
 					{ label: 'Referral code', value: code },
 				],

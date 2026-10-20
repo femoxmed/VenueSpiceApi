@@ -123,6 +123,15 @@ export class DiscountsService {
 			throw new BadRequestException('Event does not belong to this organization');
 		}
 
+		const startsAt = dto.startsAt ? new Date(dto.startsAt) : null;
+		const endsAt = dto.endsAt ? new Date(dto.endsAt) : null;
+		if ((startsAt && !Number.isFinite(startsAt.getTime())) || (endsAt && !Number.isFinite(endsAt.getTime()))) {
+			throw new BadRequestException('Invalid campaign dates');
+		}
+		if (startsAt && endsAt && endsAt < startsAt) {
+			throw new BadRequestException('Coupon expiry date cannot be before start date');
+		}
+
 		const agent = dto.agentId
 			? await this.agentsRepository.findOne({ where: { id: dto.agentId } })
 			: await this.findOrInviteInfluencer(organization, dto.influencerEmail, dto.influencerName);
@@ -145,8 +154,8 @@ export class DiscountsService {
 				influencerCommissionPercent: influencerRewardType === 'percentage' ? influencerRewardValue : 0,
 				influencerRewardType,
 				influencerRewardValue,
-				startsAt: dto.startsAt ? new Date(dto.startsAt) : null,
-				endsAt: dto.endsAt ? new Date(dto.endsAt) : null,
+				startsAt,
+				endsAt,
 				maxUses: dto.maxUses ?? null,
 				status,
 			}),
@@ -658,7 +667,9 @@ export class DiscountsService {
 				rows: [
 					{ label: 'Event', value: title },
 					{ label: 'Organizer', value: organizationName },
-					...(event?.startsAt ? [{ label: 'Starts', value: event.startsAt }] : []),
+					...(event?.startsAt ? [{ label: 'Event date', value: new Date(event.startsAt).toLocaleString('en-US', { timeZone: event.timezone || 'UTC', timeZoneName: 'short' }) }] : []),
+					{ label: 'Discount starts', value: coupon.startsAt ? new Date(coupon.startsAt).toUTCString() : 'Immediately after campaign approval' },
+					{ label: 'Discount ends', value: coupon.endsAt ? new Date(coupon.endsAt).toUTCString() : 'No expiry date' },
 					{ label: 'Location', value: location },
 					{ label: 'Coupon code', value: coupon.code },
 					{ label: 'Coupon value', value: this.formatCouponValue(coupon) },
