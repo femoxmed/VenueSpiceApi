@@ -58,7 +58,10 @@ export class BuyerAuthService {
   });
   if(!result) throw new UnauthorizedException('Invalid or expired code. Request a new code if needed.');
   const emailProofAt=Date.now();
-  const claims={sub:result.id,email:result.email,role:result.role,scope:'buyer',emailProofAt};
-  return {accessToken:this.jwt.sign(claims),refreshToken:this.jwt.sign({...claims,type:'refresh'},{secret:this.config.get<string>('JWT_REFRESH_SECRET')||this.config.get<string>('JWT_SECRET','change-me'),expiresIn:'30d'}),user:{...await this.auth.validateUser(result.id),sessionScope:'buyer'}};
+  // Email-code login grants business access only to supported non-platform accounts.
+  const businessAccount=['organization','influencer','vendor'].includes(result.accountType || '') && [Role.ORG_ADMIN,Role.ORG_STAFF,Role.AGENT,Role.USER,Role.CUSTOMER].includes(result.role);
+  const scope=businessAccount ? undefined : 'buyer';
+  const claims={sub:result.id,email:result.email,role:result.role,...(scope ? {scope} : {}),emailProofAt};
+  return {accessToken:this.jwt.sign(claims),refreshToken:this.jwt.sign({...claims,type:'refresh'},{secret:this.config.get<string>('JWT_REFRESH_SECRET')||this.config.get<string>('JWT_SECRET','change-me'),expiresIn:'30d'}),user:{...await this.auth.validateUser(result.id),sessionScope:scope}};
  }
 }

@@ -39,10 +39,10 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
  await assert.rejects(()=>service.verify(first.user.email,claim.challengeId,emails[0].code),/Invalid or expired/);
  await assert.rejects(()=>service.request(first.user.email,'127.0.0.1',true),/60 seconds/);
  await assert.rejects(()=>service.request('no-consent@example.invalid','127.0.0.1',false),/terms/);
- // Every existing account keeps its identity and privileges, while email-code tokens are ticket-scoped.
+ // Business accounts receive dashboard sessions; platform administrators remain ticket-scoped.
  for(const [i,role,accountType] of [[10,'super_admin',null],[11,'org_admin','organization'],[12,'agent','influencer'],[13,'user','vendor']]){
   const email=`role${i}@example.invalid`;await db.getRepository(User).save({id:id(i),email,fullName:'Existing',passwordHash:'unchanged',role,accountType,isActive:true,verifiedAt:new Date()});
-  const session=await login(email);assert.equal(session.user.id,id(i));assert.equal(session.user.role,role);assert.equal(session.user.accountType,accountType);assert.equal((await db.getRepository(User).findOneBy({id:id(i)})).passwordHash,'unchanged');
+  const session=await login(email);assert.equal(session.user.id,id(i));assert.equal(session.user.role,role);assert.equal(session.user.accountType,accountType);const claims=jwt.verify(session.accessToken);assert.equal(claims.scope,i===10?'buyer':undefined);assert.equal(session.user.sessionScope,claims.scope);const refreshedBusiness=await auth.refresh(session.refreshToken);assert.equal(jwt.verify(refreshedBusiness.accessToken).scope,claims.scope);if(i!==10)assert.equal((await new JwtStrategy(config,auth).validate(claims)).id,id(i));assert.equal((await db.getRepository(User).findOneBy({id:id(i)})).passwordHash,'unchanged');
  }
  const normalStrategy=new JwtStrategy(config,auth),buyerStrategy=new BuyerJwtStrategy(config,auth);
  const payload=jwt.verify(first.accessToken);
