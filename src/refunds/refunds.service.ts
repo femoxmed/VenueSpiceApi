@@ -1,8 +1,9 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Request } from 'express';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
+import { Cron } from '@nestjs/schedule';
 import { AuditService } from '../audit/audit.service';
 import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
@@ -22,11 +23,13 @@ type StripeRefund = {
 	amount?: number;
 	currency?: string;
 	payment_intent?: string;
-	error?: { message?: string };
+	error?: { message?: string; type?: string };
 };
 
 @Injectable()
 export class RefundsService {
+ private readonly logger = new Logger(RefundsService.name);
+ private reconciling = false;
 	constructor(
 		@InjectRepository(RefundRequestEntity)
 		private readonly refundsRepository: Repository<RefundRequestEntity>,
@@ -112,22 +115,22 @@ export class RefundsService {
 		}
 		this.ensureOrderCanBeRefunded(refund.order);
 
+		this.requireStripePayment(refund.order);
 		const before = this.pickRefundAuditFields(refund);
+		refund.amount = this.calculateRefundAmount(refund.order);
 		refund.status = 'processing';
 		refund.reviewedById = actor.id;
 		refund.reviewedBy = await this.usersRepository.findOne({ where: { id: actor.id } });
 		refund.reviewNote = dto.note?.trim() || null;
 		refund.reviewedAt = new Date();
-		await this.refundsRepository.save(refund);
+        const claimed = await this.refundsRepository.update({ id, status: 'requested' }, {
+            status: 'processing', amount: refund.amount, reviewedById: actor.id,
+            reviewNote: refund.reviewNote, reviewedAt: refund.reviewedAt,
+        });
+        if (!claimed.affected) throw new BadRequestException('This refund is already being reviewed');
+        const stripeRefund = await this.createStripeRefund(refund);
+        const saved = await this.applyStripeRefund(refund.id, stripeRefund);
 
-		const stripeRefund = await this.createStripeRefund(refund.order);
-		refund.stripeRefundId = stripeRefund?.id ?? null;
-		refund.providerPayload = stripeRefund as Record<string, unknown> | null;
-		refund.status = stripeRefund ? 'succeeded' : 'succeeded';
-		refund.completedAt = new Date();
-		const saved = await this.refundsRepository.save(refund);
-
-		await this.markOrderRefunded(refund.order);
 		await this.auditService.log(
 			'refund.approved',
 			actor,
@@ -137,7 +140,6 @@ export class RefundsService {
 			{ orderId: refund.order.id, stripeRefundId: saved.stripeRefundId },
 			request,
 		);
-		await this.notifyOrganizer(saved, 'approved');
 		return saved;
 	}
 
@@ -158,7 +160,9 @@ export class RefundsService {
 		refund.reviewedBy = await this.usersRepository.findOne({ where: { id: actor.id } });
 		refund.reviewNote = dto.note?.trim() || null;
 		refund.reviewedAt = new Date();
-		const saved = await this.refundsRepository.save(refund);
+		const declined = await this.refundsRepository.update({id, status: 'requested'}, {status: 'declined', reviewedById: actor.id, reviewNote: refund.reviewNote, reviewedAt: refund.reviewedAt});
+		if (!declined.affected) throw new BadRequestException('This refund is already being reviewed');
+		const saved = await this.refundsRepository.findOneOrFail({where: {id}});
 
 		await this.auditService.log(
 			'refund.declined',
@@ -205,46 +209,90 @@ export class RefundsService {
 		}
 	}
 
-	private async createStripeRefund(order: TicketOrderEntity) {
-		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
-		const refundAmount = this.calculateRefundAmount(order);
-		const refundAmountCents = Math.round(refundAmount * 100);
-		if (!secretKey || !order.stripePaymentIntentId || order.stripePaymentIntentId.startsWith('txn_')) {
-			return {
-				id: `local_refund_${order.id}`,
-				status: 'succeeded',
-				amount: refundAmountCents,
-				currency: order.currency.toLowerCase(),
-				payment_intent: order.stripePaymentIntentId ?? `local_${order.id}`,
-				reverse_transfer: true,
-				refund_application_fee: true,
-			};
-		}
+ private requireStripePayment(order: TicketOrderEntity) {
+  const secret = this.configService.get<string>('STRIPE_SECRET_KEY');
+  if (!secret) throw new BadRequestException('Stripe is not configured. No refund has been issued.');
+  if (!/^pi_[A-Za-z0-9]+$/.test(order.stripePaymentIntentId || '')) throw new BadRequestException('This order has no valid Stripe payment reference. No refund has been issued.');
+  return secret;
+ }
 
-		const params = new URLSearchParams();
-		params.set('payment_intent', order.stripePaymentIntentId);
-		params.set('amount', String(refundAmountCents));
-		params.set('reverse_transfer', 'true');
-		params.set('refund_application_fee', 'true');
-		params.set('metadata[ticketOrderId]', order.id);
-		params.set('metadata[reverseTransfer]', 'true');
-		params.set('metadata[refundApplicationFee]', 'true');
-		params.set('metadata[refundablePercentage]', String(order.event?.refundablePercentage ?? 100));
+ private async createStripeRefund(refund: RefundRequestEntity, retry = false) {
+  const order = refund.order;
+  const secretKey = this.requireStripePayment(order);
+  const params = new URLSearchParams({payment_intent: order.stripePaymentIntentId!, amount: String(Math.round(Number(refund.amount) * 100)), reverse_transfer: 'true', refund_application_fee: 'true'});
+  params.set('metadata[ticketOrderId]', order.id);
+  params.set('metadata[refundRequestId]', refund.id);
+  // Persisted request amount and a stable key make retries safe after timeouts.
+  const response = await fetch('https://api.stripe.com/v1/refunds', {
+   method: 'POST', headers: {Authorization: `Bearer ${secretKey}`, 'Content-Type': 'application/x-www-form-urlencoded', 'Idempotency-Key': `venuespice-refund:${refund.id}`}, body: params,
+   signal: AbortSignal.timeout(15000),
+  });
+  const payload = await response.json() as StripeRefund;
+  if (!response.ok) {
+   // Server/network errors are ambiguous: leave processing for reconciliation.
+   if (!retry && payload.error?.type !== 'idempotency_error' && response.status >= 400 && response.status < 500 && ![409,429].includes(response.status)) {
+    await this.refundsRepository.update({id: refund.id, status: 'processing'}, {status: 'failed', providerPayload: {error: {message: payload.error?.message || 'Stripe rejected the refund'}}});
+   }
+   throw new BadRequestException(payload.error?.message ?? 'Stripe refund could not be confirmed.');
+  }
+  return payload;
+ }
 
-		const response = await fetch('https://api.stripe.com/v1/refunds', {
-			method: 'POST',
-			headers: {
-				Authorization: `Bearer ${secretKey}`,
-				'Content-Type': 'application/x-www-form-urlencoded',
-			},
-			body: params,
-		});
-		const payload = (await response.json()) as StripeRefund;
-		if (!response.ok) {
-			throw new BadRequestException(payload.error?.message ?? 'Stripe refund failed');
-		}
-		return payload;
-	}
+ private async applyStripeRefund(id: string, provider: StripeRefund) {
+  let completed = false;
+  const saved = await this.refundsRepository.manager.transaction(async manager => {
+   // Lock only the request row (eager joins include nullable relations).
+   await manager.getRepository(RefundRequestEntity).createQueryBuilder('refund').where('refund.id = :id', {id}).setLock('pessimistic_write').getOneOrFail();
+   const refund = await manager.getRepository(RefundRequestEntity).findOneOrFail({where: {id}});
+   if (refund.status === 'succeeded' || refund.status === 'failed') return refund;
+   if (!provider.id?.startsWith('re_') || provider.payment_intent !== refund.order.stripePaymentIntentId || provider.amount !== Math.round(Number(refund.amount)*100) || provider.currency?.toLowerCase() !== refund.currency.toLowerCase()) {
+    throw new BadRequestException('Stripe refund details do not match this request. Refund remains unconfirmed.');
+   }
+   refund.stripeRefundId = provider.id;
+   refund.providerPayload = provider as Record<string, unknown>;
+   refund.status = provider.status === 'succeeded' ? 'succeeded' : ['failed','canceled'].includes(provider.status || '') ? 'failed' : 'processing';
+   refund.completedAt = refund.status === 'succeeded' ? new Date() : null;
+   if (refund.status === 'succeeded') {
+    await this.markOrderRefunded(refund.order, manager);
+    completed = true;
+   }
+   return manager.save(RefundRequestEntity, refund);
+  });
+  if (completed) await this.notifyOrganizer(saved, 'approved');
+  return saved;
+ }
+
+ @Cron('*/1 * * * *')
+ async reconcileProcessingRefunds() {
+  if (this.reconciling) return;
+  this.reconciling = true;
+  try {
+   const refunds = await this.refundsRepository.find({where: {status: 'processing'}, order: {updatedAt: 'ASC'}, take: 100});
+   for (const refund of refunds) {
+    try {
+     const secret = this.requireStripePayment(refund.order);
+     let provider: StripeRefund;
+     if (refund.stripeRefundId) {
+      const response = await fetch(`https://api.stripe.com/v1/refunds/${encodeURIComponent(refund.stripeRefundId)}`, {headers: {Authorization: `Bearer ${secret}`}, signal: AbortSignal.timeout(15000)});
+      if (!response.ok) throw new Error('Stripe refund status unavailable');
+      provider = await response.json() as StripeRefund;
+     } else {
+      // Never repeat a creation after Stripe's minimum 24-hour idempotency window.
+      if (!refund.reviewedAt || Date.now()-new Date(refund.reviewedAt).getTime() >= 23*60*60*1000) {
+       this.logger.warn(`Refund ${refund.id} needs manual Stripe reconciliation; no new refund was issued.`);
+       await this.refundsRepository.update({id: refund.id, status: 'processing'}, {updatedAt: new Date()});
+       continue;
+      }
+      provider = await this.createStripeRefund(refund, true);
+     }
+     await this.applyStripeRefund(refund.id, provider);
+    } catch {
+     this.logger.warn(`Refund ${refund.id} could not be reconciled; no success was recorded.`);
+     await this.refundsRepository.update({id: refund.id, status: 'processing'}, {updatedAt: new Date()});
+    }
+   }
+  } finally { this.reconciling = false; }
+ }
 
 	private calculateRefundAmount(order: TicketOrderEntity) {
 		const percentage = Math.min(100, Math.max(0, Number(order.event?.refundablePercentage ?? 100)));
@@ -335,11 +383,11 @@ export class RefundsService {
 		}).format(Number(value || 0));
 	}
 
-	private async markOrderRefunded(order: TicketOrderEntity) {
+	private async markOrderRefunded(order: TicketOrderEntity, manager: EntityManager) {
 		order.status = 'refunded';
 		for (const ticket of order.tickets || []) {
 			ticket.status = 'refunded';
-			await this.issuedTicketsRepository.save(ticket);
+			await manager.save(IssuedTicketEntity, ticket);
 		}
 		for (const item of order.items || []) {
 			if (item.ticketType) {
@@ -347,16 +395,16 @@ export class RefundsService {
 				if (item.ticketType.status === 'sold_out') {
 					item.ticketType.status = 'active';
 				}
-				await this.ticketTypesRepository.save(item.ticketType);
+				await manager.save(TicketTypeEntity, item.ticketType);
 			}
 		}
-		await this.markInvoiceAndTransactionRefunded(order);
-		return this.ticketOrdersRepository.save(order);
+		await this.markInvoiceAndTransactionRefunded(order, manager);
+		return manager.save(TicketOrderEntity, order);
 	}
 
-	private async markInvoiceAndTransactionRefunded(order: TicketOrderEntity) {
+	private async markInvoiceAndTransactionRefunded(order: TicketOrderEntity, manager: EntityManager) {
 		const idempotencyKey = `ticket-order:${order.id}`;
-		const transaction = await this.paymentIntentsRepository.findOne({
+		const transaction = await manager.getRepository(PaymentIntentEntity).findOne({
 			where: { idempotencyKey },
 			relations: { invoice: true },
 		});
@@ -369,12 +417,12 @@ export class RefundsService {
 				reverseTransfer: true,
 				refundApplicationFee: true,
 			};
-			await this.paymentIntentsRepository.save(transaction);
+			await manager.save(PaymentIntentEntity, transaction);
 		}
 
 		if (transaction?.invoice) {
 			transaction.invoice.status = 'refunded';
-			await this.invoicesRepository.save(transaction.invoice);
+			await manager.save(InvoiceEntity, transaction.invoice);
 		}
 	}
 
