@@ -13,6 +13,8 @@ import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { refundBreakdown, RefundReason } from './refund-policy';
+import { AdminRefundDto } from './dto/admin-refund.dto';
 import { CreateRefundRequestDto } from './dto/create-refund-request.dto';
 import { ReviewRefundRequestDto } from './dto/review-refund-request.dto';
 import { RefundRequestEntity } from './entities/refund-request.entity';
@@ -50,6 +52,52 @@ export class RefundsService {
 		private readonly notificationsService: NotificationsService,
 	) {}
 
+ private assertPlatformAdmin(actor: {role: Role}) {
+  if (!this.isAdminRole(actor.role)) throw new ForbiddenException('Platform administrator access required');
+ }
+ private async verifyAdminPayment(order: TicketOrderEntity) {
+  const secret=this.requireStripePayment(order);
+  const get=async(path:string)=>{
+   const response=await fetch(`https://api.stripe.com/v1/${path}`,{method:'GET',headers:{Authorization:`Bearer ${secret}`},signal:AbortSignal.timeout(10000)});
+   if(!response.ok) throw new BadRequestException('Unable to verify the original Stripe payment. No refund issued.');
+   return response.json();
+  };
+  const payment=await get(`payment_intents/${encodeURIComponent(order.stripePaymentIntentId!)}?expand[]=latest_charge`);
+  if(payment.id!==order.stripePaymentIntentId || payment.status!=='succeeded' || payment.currency?.toLowerCase()!==order.currency.toLowerCase() || payment.amount_received!==Math.round(Number(order.total)*100)) throw new BadRequestException('Stripe payment does not match the paid order. Reconcile it before issuing a refund.');
+  if(!payment.latest_charge || typeof payment.latest_charge!=='object' || payment.latest_charge.disputed || payment.latest_charge.amount_refunded>0) throw new BadRequestException('Payment has a dispute, existing refund, or incomplete charge details. Review reconciliation first.');
+  const refunds=await get(`refunds?${new URLSearchParams({payment_intent:order.stripePaymentIntentId!,limit:'100'})}`);
+  if(!Array.isArray(refunds.data) || refunds.has_more || refunds.data.some((r:{status:string})=>!['failed','canceled'].includes(r.status))) throw new BadRequestException('Stripe already has a refund for this payment. Review reconciliation first.');
+ }
+ async adminPreview(orderId:string,actor:{role:Role},cancellationReason:RefundReason = 'voluntary') {
+  this.assertPlatformAdmin(actor);
+  const order=await this.ticketOrdersRepository.findOne({where:{id:orderId}});
+  if(!order) throw new NotFoundException('Ticket order not found');
+  this.ensureOrderCanBeRefunded(order,cancellationReason);
+  const existing=await this.refundsRepository.find({where:{orderId}});
+  if(existing.some(r=>!['failed','declined'].includes(r.status))) throw new BadRequestException('An active or completed refund exists. Review that request instead.');
+  await this.verifyAdminPayment(order);
+  return {orderId:order.id,customerEmail:order.customerEmail,customerName:order.customerName,eventTitle:order.event.title,currency:order.currency,...refundBreakdown(order,cancellationReason),taxProvider:order.taxProvider,allTicketsInvalidated:true};
+ }
+ async adminIssue(dto:AdminRefundDto,actor:{id:string;role:Role;email?:string},request?:Request) {
+  this.assertPlatformAdmin(actor);
+  if(dto.confirmed!==true || dto.reason.trim().length<5) throw new BadRequestException('Confirmation and a meaningful reason are required');
+  const preview=await this.adminPreview(dto.orderId,actor,dto.cancellationReason);
+  if(Math.round(dto.expectedAmount*100)!==Math.round(preview.refundAmount*100)) throw new BadRequestException('Refund amount changed. Review a fresh preview.');
+  const refund=await this.refundsRepository.manager.transaction(async manager=>{
+   await manager.getRepository(TicketOrderEntity).createQueryBuilder('order').where('order.id = :id',{id:dto.orderId}).setLock('pessimistic_write').getOneOrFail();
+   const order=await manager.findOneOrFail(TicketOrderEntity,{where:{id:dto.orderId}});
+   this.ensureOrderCanBeRefunded(order,dto.cancellationReason);
+   const existing=await manager.find(RefundRequestEntity,{where:{orderId:dto.orderId}});
+   if(existing.some(r=>!['failed','declined'].includes(r.status))) throw new BadRequestException('This order already has an active or completed refund');
+   const policySnapshot=refundBreakdown(order,dto.cancellationReason);
+   const amount=policySnapshot.refundAmount;
+   if(Math.round(amount*100)!==Math.round(dto.expectedAmount*100)) throw new BadRequestException('Refund policy changed. Review a fresh preview.');
+   return manager.save(RefundRequestEntity,manager.create(RefundRequestEntity,{order,orderId:order.id,customerEmail:order.customerEmail,reason:`Admin-initiated: ${dto.reason.trim()}`,reviewNote:dto.reason.trim(),reviewedById:actor.id,reviewedAt:new Date(),status:'processing',amount,policySnapshot,currency:order.currency}));
+  });
+  await this.auditService.log('refund.admin_initiated',actor,'refund_request',refund.id,{after:this.pickRefundAuditFields(refund)},{orderId:refund.orderId},request);
+  return this.applyStripeRefund(refund.id,await this.createStripeRefund(refund));
+ }
+
 	async createRequest(dto: CreateRefundRequestDto) {
 		const order = await this.ticketOrdersRepository.findOne({ where: { id: dto.orderId } });
 		if (!order) throw new NotFoundException('Ticket order not found');
@@ -58,25 +106,18 @@ export class RefundsService {
 		}
 		this.ensureOrderCanBeRefunded(order);
 
-		const existing = await this.refundsRepository.findOne({
-			where: { orderId: order.id },
-			order: { createdAt: 'DESC' },
-		});
-		if (existing && !['declined', 'failed'].includes(existing.status)) {
-			throw new BadRequestException('A refund request already exists for this order');
-		}
-
-		const refund = await this.refundsRepository.save(
-			this.refundsRepository.create({
-				order,
-				orderId: order.id,
-				customerEmail: order.customerEmail,
-				reason: dto.reason?.trim() || null,
-				amount: this.calculateRefundAmount(order),
-				currency: order.currency,
-				status: 'requested',
-			}),
-		);
+        const refund = await this.refundsRepository.manager.transaction(async manager => {
+            await manager.getRepository(TicketOrderEntity).createQueryBuilder('order').where('order.id = :id', {id: order.id}).setLock('pessimistic_write').getOneOrFail();
+            const currentOrder = await manager.findOneOrFail(TicketOrderEntity, {where: {id: order.id}});
+            this.ensureOrderCanBeRefunded(currentOrder);
+            const existing = await manager.find(RefundRequestEntity, {where: {orderId: order.id}});
+            if (existing.some(r => !['declined','failed'].includes(r.status))) throw new BadRequestException('A refund request already exists for this order');
+            return manager.save(RefundRequestEntity, manager.create(RefundRequestEntity, {
+                order: currentOrder, orderId: order.id, customerEmail: order.customerEmail,
+                reason: dto.reason?.trim() || null, amount: this.calculateRefundAmount(currentOrder), policySnapshot: refundBreakdown(currentOrder),
+                currency: order.currency, status: 'requested',
+            }));
+        });
 
 		await this.auditService.log(
 			'refund.requested',
@@ -117,14 +158,15 @@ export class RefundsService {
 
 		this.requireStripePayment(refund.order);
 		const before = this.pickRefundAuditFields(refund);
-		refund.amount = this.calculateRefundAmount(refund.order);
+		refund.policySnapshot = refundBreakdown(refund.order);
+		refund.amount = Number(refund.policySnapshot.refundAmount);
 		refund.status = 'processing';
 		refund.reviewedById = actor.id;
 		refund.reviewedBy = await this.usersRepository.findOne({ where: { id: actor.id } });
 		refund.reviewNote = dto.note?.trim() || null;
 		refund.reviewedAt = new Date();
         const claimed = await this.refundsRepository.update({ id, status: 'requested' }, {
-            status: 'processing', amount: refund.amount, reviewedById: actor.id,
+            status: 'processing', amount: refund.amount, policySnapshot: refund.policySnapshot, reviewedById: actor.id,
             reviewNote: refund.reviewNote, reviewedAt: refund.reviewedAt,
         });
         if (!claimed.affected) throw new BadRequestException('This refund is already being reviewed');
@@ -186,10 +228,13 @@ export class RefundsService {
 		return refund;
 	}
 
-	private ensureOrderCanBeRefunded(order: TicketOrderEntity) {
+	private ensureOrderCanBeRefunded(order: TicketOrderEntity, reason: RefundReason = 'voluntary') {
 		if (order.status !== 'paid') {
 			throw new BadRequestException('Only paid orders can be refunded');
 		}
+		refundBreakdown(order, reason);
+		// Admin cancellation/error refunds are allowed after cutoff or ticket use.
+		if (reason !== 'voluntary') return;
 		if ((order.tickets || []).some((ticket) => ticket.status === 'checked_in')) {
 			throw new BadRequestException('Checked-in tickets cannot be refunded');
 		}
@@ -295,8 +340,7 @@ export class RefundsService {
  }
 
 	private calculateRefundAmount(order: TicketOrderEntity) {
-		const percentage = Math.min(100, Math.max(0, Number(order.event?.refundablePercentage ?? 100)));
-		return Math.round(Number(order.total || 0) * (percentage / 100) * 100) / 100;
+		return refundBreakdown(order).refundAmount;
 	}
 
 	private async notifyOrganizer(refund: RefundRequestEntity, state: 'requested' | 'approved' | 'declined') {
@@ -436,6 +480,7 @@ export class RefundsService {
 			amount: Number(refund.amount || 0),
 			currency: refund.currency,
 			reason: refund.reason,
+			policySnapshot: refund.policySnapshot,
 			reviewNote: refund.reviewNote,
 			stripeRefundId: refund.stripeRefundId,
 			completedAt: refund.completedAt,

@@ -10,6 +10,7 @@ import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.enti
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { RefundRequestEntity } from './entities/refund-request.entity';
 import { RefundsController } from './refunds.controller';
+import { RefundReconciliationService } from './refund-reconciliation.service';
 import { RefundsService } from './refunds.service';
 
 @Module({
@@ -27,7 +28,7 @@ import { RefundsService } from './refunds.service';
 		NotificationsModule,
 	],
 	controllers: [RefundsController],
-	providers: [RefundsService],
+	providers: [RefundsService, RefundReconciliationService],
 	exports: [RefundsService],
 })
 export class RefundsModule {}

@@ -1,3 +1,4 @@
+import type { refundBreakdown } from '../refund-policy';
 import {
 	Index,
 	Column,
@@ -39,6 +40,9 @@ export class RefundRequestEntity {
 
 	@Column({ name: 'stripe_refund_id', type: 'varchar', nullable: true })
 	stripeRefundId?: string | null;
+
+	@Column({ name: 'policy_snapshot', type: 'jsonb', nullable: true })
+	policySnapshot?: ReturnType<typeof refundBreakdown> | null;
 
 	@Column({ name: 'provider_payload', type: 'jsonb', nullable: true })
 	providerPayload?: Record<string, unknown> | null;

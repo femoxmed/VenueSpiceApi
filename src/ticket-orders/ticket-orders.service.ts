@@ -363,6 +363,7 @@ export class TicketOrdersService {
 				processingFeeFixed: feeEstimate.processingFeeFixed,
 				feeSnapshot: {
 					...feeEstimate,
+					refundPolicyVersion: 'processing-retained-v1',
 					discount: this.toDiscountSnapshot(discount, feeEstimate.influencerCommission),
 					addOns,
 				},
