@@ -2,7 +2,7 @@ import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundEx
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Request } from 'express';
-import { EntityManager, Repository } from 'typeorm';
+import { EntityManager, IsNull, Repository } from 'typeorm';
 import { Cron } from '@nestjs/schedule';
 import { AuditService } from '../audit/audit.service';
 import { UserEntity } from '../auth/entities/user.entity';
@@ -13,10 +13,11 @@ import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
-import { refundBreakdown, RefundReason } from './refund-policy';
+import { refundBreakdown, adminRefundBreakdown, RefundAmounts, RefundReason } from './refund-policy';
 import { AdminRefundDto } from './dto/admin-refund.dto';
 import { CreateRefundRequestDto } from './dto/create-refund-request.dto';
 import { ReviewRefundRequestDto } from './dto/review-refund-request.dto';
+import { RefundEmailEntity } from './entities/refund-email.entity';
 import { RefundRequestEntity } from './entities/refund-request.entity';
 
 type StripeRefund = {
@@ -68,33 +69,47 @@ export class RefundsService {
   const refunds=await get(`refunds?${new URLSearchParams({payment_intent:order.stripePaymentIntentId!,limit:'100'})}`);
   if(!Array.isArray(refunds.data) || refunds.has_more || refunds.data.some((r:{status:string})=>!['failed','canceled'].includes(r.status))) throw new BadRequestException('Stripe already has a refund for this payment. Review reconciliation first.');
  }
- async adminPreview(orderId:string,actor:{role:Role},cancellationReason:RefundReason = 'voluntary') {
+ async adminPreview(orderId:string,actor:{role:Role},cancellationReason:RefundReason = 'voluntary', refundAmounts?:RefundAmounts, requestId?:string) {
   this.assertPlatformAdmin(actor);
   const order=await this.ticketOrdersRepository.findOne({where:{id:orderId}});
   if(!order) throw new NotFoundException('Ticket order not found');
   this.ensureOrderCanBeRefunded(order,cancellationReason);
   const existing=await this.refundsRepository.find({where:{orderId}});
-  if(existing.some(r=>!['failed','declined'].includes(r.status))) throw new BadRequestException('An active or completed refund exists. Review that request instead.');
+  if(requestId && !existing.some(r=>r.id===requestId && r.status==='requested')) throw new BadRequestException('This request is no longer awaiting approval');
+  if(existing.some(r=>r.id!==requestId && !['failed','declined'].includes(r.status))) throw new BadRequestException('An active or completed refund exists. Review that request instead.');
   await this.verifyAdminPayment(order);
-  return {orderId:order.id,customerEmail:order.customerEmail,customerName:order.customerName,eventTitle:order.event.title,currency:order.currency,...refundBreakdown(order,cancellationReason),taxProvider:order.taxProvider,allTicketsInvalidated:true};
+  return {orderId:order.id,customerEmail:order.customerEmail,customerName:order.customerName,eventTitle:order.event.title,currency:order.currency,...adminRefundBreakdown(order,cancellationReason,refundAmounts),taxProvider:order.taxProvider,allTicketsInvalidated:adminRefundBreakdown(order,cancellationReason,refundAmounts).refundComponents.tickets>0};
  }
- async adminIssue(dto:AdminRefundDto,actor:{id:string;role:Role;email?:string},request?:Request) {
+ async previewRequest(id:string,actor:{role:Role},cancellationReason:RefundReason='voluntary') {
+  this.assertPlatformAdmin(actor);
+  const refund=await this.refundsRepository.findOne({where:{id}});
+  if(!refund) throw new NotFoundException('Refund request not found');
+  return this.adminPreview(refund.orderId,actor,cancellationReason,undefined,id);
+ }
+
+ async adminIssue(dto:AdminRefundDto,actor:{id:string;role:Role;email?:string},request?:Request, requestId?:string) {
   this.assertPlatformAdmin(actor);
   if(dto.confirmed!==true || dto.reason.trim().length<5) throw new BadRequestException('Confirmation and a meaningful reason are required');
-  const preview=await this.adminPreview(dto.orderId,actor,dto.cancellationReason);
+  const preview=await this.adminPreview(dto.orderId,actor,dto.cancellationReason,dto.refundAmounts,requestId);
   if(Math.round(dto.expectedAmount*100)!==Math.round(preview.refundAmount*100)) throw new BadRequestException('Refund amount changed. Review a fresh preview.');
   const refund=await this.refundsRepository.manager.transaction(async manager=>{
    await manager.getRepository(TicketOrderEntity).createQueryBuilder('order').where('order.id = :id',{id:dto.orderId}).setLock('pessimistic_write').getOneOrFail();
    const order=await manager.findOneOrFail(TicketOrderEntity,{where:{id:dto.orderId}});
    this.ensureOrderCanBeRefunded(order,dto.cancellationReason);
    const existing=await manager.find(RefundRequestEntity,{where:{orderId:dto.orderId}});
-   if(existing.some(r=>!['failed','declined'].includes(r.status))) throw new BadRequestException('This order already has an active or completed refund');
-   const policySnapshot=refundBreakdown(order,dto.cancellationReason);
+   if(requestId && !existing.some(r=>r.id===requestId && r.status==='requested')) throw new BadRequestException('This request is no longer awaiting approval');
+   if(existing.some(r=>r.id!==requestId && !['failed','declined'].includes(r.status))) throw new BadRequestException('This order already has an active or completed refund');
+   const policySnapshot=adminRefundBreakdown(order,dto.cancellationReason,dto.refundAmounts);
    const amount=policySnapshot.refundAmount;
    if(Math.round(amount*100)!==Math.round(dto.expectedAmount*100)) throw new BadRequestException('Refund policy changed. Review a fresh preview.');
+   if(requestId) {
+    const claimed=await manager.update(RefundRequestEntity,{id:requestId,orderId:order.id,status:'requested'},{status:'processing',amount,policySnapshot,reviewNote:dto.reason.trim(),reviewedById:actor.id,reviewedAt:new Date()});
+    if(!claimed.affected) throw new BadRequestException('This request is already being reviewed');
+    return manager.findOneOrFail(RefundRequestEntity,{where:{id:requestId}});
+   }
    return manager.save(RefundRequestEntity,manager.create(RefundRequestEntity,{order,orderId:order.id,customerEmail:order.customerEmail,reason:`Admin-initiated: ${dto.reason.trim()}`,reviewNote:dto.reason.trim(),reviewedById:actor.id,reviewedAt:new Date(),status:'processing',amount,policySnapshot,currency:order.currency}));
   });
-  await this.auditService.log('refund.admin_initiated',actor,'refund_request',refund.id,{after:this.pickRefundAuditFields(refund)},{orderId:refund.orderId},request);
+  await this.auditService.log(requestId?'refund.approved':'refund.admin_initiated',actor,'refund_request',refund.id,{after:this.pickRefundAuditFields(refund)},{orderId:refund.orderId},request);
   return this.applyStripeRefund(refund.id,await this.createStripeRefund(refund));
  }
 
@@ -276,7 +291,14 @@ export class RefundsService {
   if (!response.ok) {
    // Server/network errors are ambiguous: leave processing for reconciliation.
    if (!retry && payload.error?.type !== 'idempotency_error' && response.status >= 400 && response.status < 500 && ![409,429].includes(response.status)) {
-    await this.refundsRepository.update({id: refund.id, status: 'processing'}, {status: 'failed', providerPayload: {error: {message: payload.error?.message || 'Stripe rejected the refund'}}});
+    await this.refundsRepository.manager.transaction(async manager=>{
+     await manager.getRepository(RefundRequestEntity).createQueryBuilder('refund').where('refund.id = :id',{id:refund.id}).setLock('pessimistic_write').getOneOrFail();
+     const current=await manager.findOneOrFail(RefundRequestEntity,{where:{id:refund.id}});
+     if(current.status!=='processing') return;
+     current.status='failed';current.providerPayload={error:{message:payload.error?.message || 'Stripe rejected the refund'}};
+     await manager.save(RefundRequestEntity,current);await this.recordCustomerEmail(manager,current);
+    });
+    await this.dispatchRefundEmails();
    }
    throw new BadRequestException(payload.error?.message ?? 'Stripe refund could not be confirmed.');
   }
@@ -298,13 +320,60 @@ export class RefundsService {
    refund.status = provider.status === 'succeeded' ? 'succeeded' : ['failed','canceled'].includes(provider.status || '') ? 'failed' : 'processing';
    refund.completedAt = refund.status === 'succeeded' ? new Date() : null;
    if (refund.status === 'succeeded') {
-    await this.markOrderRefunded(refund.order, manager);
+    const components=refund.policySnapshot && 'refundComponents' in refund.policySnapshot ? refund.policySnapshot.refundComponents : null;
+    if(!components || components.tickets>0) await this.markOrderRefunded(refund.order, manager);
     completed = true;
    }
-   return manager.save(RefundRequestEntity, refund);
+   await manager.save(RefundRequestEntity, refund);
+   await this.recordCustomerEmail(manager,refund);
+   return refund;
   });
+  await this.dispatchRefundEmails();
   if (completed) await this.notifyOrganizer(saved, 'approved');
   return saved;
+ }
+
+ private async recordCustomerEmail(manager:EntityManager, refund:RefundRequestEntity) {
+  if(!['processing','succeeded','failed'].includes(refund.status)) return;
+  const state=refund.status;
+  const snapshot=refund.policySnapshot;
+  const components=snapshot && 'refundComponents' in snapshot ? snapshot.refundComponents : null;
+  const cancelsTickets=!components || components.tickets>0;
+  const title=state==='processing'?'Your refund is approved and processing':state==='succeeded'?'Your refund is confirmed':'Your refund could not be completed';
+  const intro=state==='processing'?'Your refund has been accepted for processing. It has not yet been confirmed as complete.':state==='succeeded'?'Stripe has confirmed your refund to the original payment method. Your bank may take additional time to display the credit.':'The payment provider could not complete your refund. Our team needs to review it; no successful refund has been confirmed.';
+  const rows=[{label:'Event',value:refund.order.event.title},{label:'Order',value:refund.orderId},{label:'Refund amount',value:this.formatCurrency(Number(refund.amount),refund.currency)},
+   {label:'Tickets',value:state==='succeeded'?(cancelsTickets?'All tickets in this order are canceled':'Tickets remain valid'):cancelsTickets?'Tickets remain unchanged until refund success':'Tickets remain valid'},
+   {label:'Refund reference',value:refund.stripeRefundId || refund.id}];
+  if(snapshot) {
+   rows.push({label:'Ticket / add-on portion',value:this.formatCurrency(snapshot.refundedSubtotal,refund.currency)},
+    {label:'Fee portion',value:this.formatCurrency(snapshot.refundedFees,refund.currency)},
+    {label:'Tax portion',value:this.formatCurrency(snapshot.taxPortion,refund.currency)},
+    {label:'Amount retained',value:this.formatCurrency(snapshot.totalRetained,refund.currency)});
+   rows.push({label:'Processing fee retained',value:this.formatCurrency(snapshot.retainedProcessingFee,refund.currency)});
+   if(components && 'availableComponents' in snapshot) rows.push({label:'Service fee retained',value:this.formatCurrency(snapshot.availableComponents.serviceFee-components.serviceFee,refund.currency)});
+   if(components) rows.push({label:'Service fee portion',value:this.formatCurrency(components.serviceFee,refund.currency)},{label:'Processing fee portion',value:this.formatCurrency(components.processingFee,refund.currency)});
+  }
+  const html=this.notificationsService.buildBrandedEmail({title,intro,greeting:`Hello ${refund.order.customerName || 'there'},`,rows});
+  await manager.createQueryBuilder().insert().into(RefundEmailEntity).values({id:`refund-${refund.id}-${state}-buyer`,recipient:refund.customerEmail,subject:title,html}).orIgnore().execute();
+  if(state==='failed') {
+   const reviewer=refund.reviewedById?await manager.findOne(UserEntity,{where:{id:refund.reviewedById}}):null;
+   if(reviewer?.email) await manager.createQueryBuilder().insert().into(RefundEmailEntity).values({id:`refund-${refund.id}-${state}-admin`,recipient:reviewer.email,subject:`Refund needs attention: ${refund.orderId}`,html:this.notificationsService.buildBrandedEmail({title:'Refund needs attention',intro:'The provider rejected or failed this refund. Review the provider record before taking further action.',rows})}).orIgnore().execute();
+  }
+ }
+
+ @Cron('*/1 * * * *')
+ async dispatchRefundEmails() {
+  try {
+   const pending=await this.refundsRepository.manager.find(RefundEmailEntity,{where:{queuedAt:IsNull()},order:{createdAt:'ASC'},take:100});
+   for(const item of pending) {
+    await this.refundsRepository.manager.transaction(async manager=>{
+     const row=await manager.getRepository(RefundEmailEntity).createQueryBuilder('email').where('email.id = :id',{id:item.id}).setLock('pessimistic_write').getOne();
+     if(!row || row.queuedAt) return;
+     await this.notificationsService.queueEmail(row.recipient,row.subject,row.html,{jobId:row.id,removeOnComplete:false,removeOnFail:false});
+     row.queuedAt=new Date();await manager.save(RefundEmailEntity,row);
+    });
+   }
+  } catch { this.logger.warn('Refund emails remain in the outbox for retry; refund status was not changed.'); }
  }
 
  @Cron('*/1 * * * *')
@@ -364,7 +433,7 @@ export class RefundsService {
 				subject: `Refund approved for ${eventTitle}`,
 				title: 'Refund approved',
 				message: `${amount} was refunded to ${refund.customerEmail} for ${eventTitle}.`,
-				intro: 'A refund has been approved and the related tickets/order have been marked as refunded.',
+				intro: 'Stripe has confirmed the refund. Ticket cancellations apply only when ticket charges were refunded.',
 			},
 			declined: {
 				type: 'refund.declined',

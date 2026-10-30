@@ -36,6 +36,19 @@ export class RefundsController {
   return this.refundsService.adminIssue(dto,req.user,req as any);
  }
 
+ @UseGuards(JwtAuthGuard, RolesGuard)
+ @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Get('requests/:id/preview')
+ previewRequest(@Param('id',ParseUUIDPipe) id:string,@Query('cancellationReason') reason:RefundReason,@Req() req:{user:{role:Role}}) {
+  return this.refundsService.previewRequest(id,req.user,reason);
+ }
+ @UseGuards(JwtAuthGuard, RolesGuard)
+ @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Post('requests/:id/approve-selected')
+ approveSelected(@Param('id',ParseUUIDPipe) id:string,@Body() dto:AdminRefundDto,@Req() req:{user:{id:string;role:Role;email?:string}}) {
+  return this.refundsService.adminIssue(dto,req.user,req as any,id);
+ }
+
 	@ApiOperation({ summary: 'Request a ticket order refund' })
 	@ApiResponse({ status: 201, description: 'Refund request created.' })
 	@Post('requests')

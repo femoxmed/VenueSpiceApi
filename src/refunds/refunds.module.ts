@@ -8,6 +8,7 @@ import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { RefundEmailEntity } from './entities/refund-email.entity';
 import { RefundRequestEntity } from './entities/refund-request.entity';
 import { RefundsController } from './refunds.controller';
 import { RefundReconciliationService } from './refund-reconciliation.service';
@@ -17,6 +18,7 @@ import { RefundsService } from './refunds.service';
 	imports: [
 		TypeOrmModule.forFeature([
 			RefundRequestEntity,
+			RefundEmailEntity,
 			TicketOrderEntity,
 			IssuedTicketEntity,
 			TicketTypeEntity,

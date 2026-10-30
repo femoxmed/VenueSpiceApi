@@ -24,7 +24,8 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
  const originalFetch=global.fetch;
  try {
   await db.initialize();let secret='sk_test_synthetic';
-  const service=new RefundsService(...[Refund,Order,Ticket,Type,User,Invoice,Payment].map(e=>db.getRepository(e)),{get:()=>secret},{log:async()=>{}},{});
+  const emailJobs=[];
+  const service=new RefundsService(...[Refund,Order,Ticket,Type,User,Invoice,Payment].map(e=>db.getRepository(e)),{get:()=>secret},{log:async()=>{}},{buildBrandedEmail:input=>JSON.stringify(input),queueEmail:async(to,subject,html,options)=>{emailJobs.push({to,subject,html,options});}});
   const notifications=[];service.notifyOrganizer=async(r,state)=>notifications.push([r.id,state]);
   const actor=await db.getRepository(User).save({email:'refund-admin@example.invalid',fullName:'Test',passwordHash:'unused',role:'super_admin'});
   const org=await db.getRepository(Org).save({name:'Refund test',slug:'refund-test',ownerUserId:actor.id});
@@ -106,6 +107,44 @@ function load(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){cons
    const requested=await service.createRequest({orderId:f.order.id,customerEmail:f.order.customerEmail,reason:'Changed plans'});assert.equal(requested.amount,48);assert.equal(requested.policySnapshot.retainedProcessingFee,2);
    global.fetch=async(url,init)=>{assert.equal(init.body.get('amount'),'4800');return {ok:true,json:async()=>({id:'re_policy',status:'succeeded',amount:4800,currency:'usd',payment_intent:f.order.stripePaymentIntentId})};};
    const approved=await service.approve(requested.id,{},actor);assert.equal(Number(approved.amount),48);assert.equal(approved.status,'succeeded');assert.equal(approved.policySnapshot.taxPortion,5);
+  }
+  // Admin can override individual components, but never exceed the original buyer charge.
+  const {adminRefundBreakdown}=require('../dist/refunds/refund-policy');
+  const selection={tickets:40,serviceFee:0,processingFee:2,tax:5};
+  const selected=adminRefundBreakdown(policyOrder,'voluntary',selection);
+  assert.equal(selected.refundAmount,47);assert.equal(selected.retainedProcessingFee,0);assert.equal(selected.refundedFees,2);assert.equal(selected.adminOverride,true);
+  for(const bad of [{...selection,tickets:51},{...selection,processingFee:3},{...selection,tax:-1},{...selection,serviceFee:0.001},{...selection,tickets:NaN},{tickets:0,serviceFee:0,processingFee:0,tax:0},{...selection,tax:undefined}]) assert.throws(()=>adminRefundBreakdown(policyOrder,'voluntary',bad));
+  const fullOverride=adminRefundBreakdown(policyOrder,'voluntary',{tickets:50,serviceFee:3,processingFee:2,tax:5});assert.equal(fullOverride.refundAmount,60);
+  const feeOnly=adminRefundBreakdown(policyOrder,'organizer_cancellation',{tickets:0,serviceFee:3,processingFee:0,tax:0});assert.equal(feeOnly.refundAmount,3);
+  {const f=await adminFixture();await db.getRepository(Order).update(f.order.id,{subtotal:40,tax:5,feeSnapshot:{refundPolicyVersion:'processing-retained-v1',buyerProcessingFee:2}});adminProvider(f);
+   const refundAmounts={tickets:40,serviceFee:0,processingFee:2,tax:5};
+   const before=await db.getRepository(Refund).count();
+   const p=await service.adminPreview(f.order.id,actor,'voluntary',refundAmounts);assert.equal(p.refundAmount,47);assert.equal(await db.getRepository(Refund).count(),before);
+   await assert.rejects(()=>service.adminIssue({orderId:f.order.id,reason:'Selected refund',cancellationReason:'voluntary',refundAmounts,expectedAmount:48,confirmed:true},actor),/amount changed/);
+   const provider=global.fetch;global.fetch=async(url,init)=>{if(init.method==='GET')return provider(url,init);assert.equal(init.body.get('amount'),'4700');return {ok:true,json:async()=>({id:'re_selected',status:'pending',amount:4700,currency:'usd',payment_intent:f.order.stripePaymentIntentId})};};
+   const saved=await service.adminIssue({orderId:f.order.id,reason:'Selected refund',cancellationReason:'voluntary',refundAmounts,expectedAmount:47,confirmed:true},actor);
+   assert.equal(Number(saved.amount),47);assert.deepEqual(saved.policySnapshot.refundComponents,refundAmounts);assert.equal(saved.policySnapshot.adminOverride,true);await untouched(f);
+   await assert.rejects(()=>service.adminIssue({orderId:f.order.id,reason:'Selected refund',cancellationReason:'voluntary',refundAmounts,expectedAmount:47,confirmed:true},actor),/exists/);
+  }
+  // Existing buyer requests are approved in place, with durable, deduplicated customer updates.
+  {const f=await fixture();await db.getRepository(Order).update(f.order.id,{subtotal:40,tax:5,feeSnapshot:{refundPolicyVersion:'processing-retained-v1',buyerProcessingFee:2}});adminProvider(f);
+   const before=await db.getRepository(Refund).count();const preview=await service.previewRequest(f.refund.id,actor);assert.equal(preview.orderId,f.order.id);assert.equal(await db.getRepository(Refund).count(),before);
+   await assert.rejects(()=>service.previewRequest(f.refund.id,{role:'org_admin'}),/administrator/);
+   const refundAmounts={tickets:0,serviceFee:3,processingFee:0,tax:0};
+   const getProvider=global.fetch;global.fetch=async(url,init)=>init.method==='GET'?getProvider(url,init):{ok:true,json:async()=>({id:'re_existingrequest',status:'pending',amount:300,currency:'usd',payment_intent:f.order.stripePaymentIntentId})};
+   const dto={orderId:f.order.id,cancellationReason:'voluntary',refundAmounts,expectedAmount:3,confirmed:true,reason:'Service fee adjustment'};
+   const results=await Promise.allSettled([service.adminIssue(dto,actor,undefined,f.refund.id),service.adminIssue(dto,actor,undefined,f.refund.id)]);
+   assert.equal(results.filter(r=>r.status==='fulfilled').length,1);const saved=results.find(r=>r.status==='fulfilled').value;assert.equal(saved.id,f.refund.id);assert.equal(await db.getRepository(Refund).count(),before);
+   assert.equal(emailJobs.filter(j=>j.options.jobId===`refund-${saved.id}-processing-buyer`).length,1);
+   const success={id:'re_existingrequest',status:'succeeded',amount:300,currency:'usd',payment_intent:f.order.stripePaymentIntentId};
+   await service.applyStripeRefund(saved.id,success);await service.applyStripeRefund(saved.id,success);await service.dispatchRefundEmails();await untouched(f);
+   const confirmed=emailJobs.filter(j=>j.options.jobId===`refund-${saved.id}-succeeded-buyer`);assert.equal(confirmed.length,1);assert.match(confirmed[0].html,/Tickets remain valid/);assert.match(confirmed[0].html,/Service fee portion/);
+  }
+  {const f=await fixture();mock(f,'failed');await service.approve(f.refund.id,{},actor);await service.dispatchRefundEmails();assert.equal(emailJobs.filter(j=>j.options.jobId===`refund-${f.refund.id}-failed-buyer`).length,1);assert.equal(emailJobs.filter(j=>j.options.jobId===`refund-${f.refund.id}-failed-admin`).length,1);await untouched(f);}
+  // A queue outage must not lose the committed outcome or send duplicate emails after recovery.
+  {const f=await fixture();const queue=service.notificationsService.queueEmail;service.notificationsService.queueEmail=async()=>{throw new Error('Synthetic queue outage');};mock(f);
+   const done=await service.approve(f.refund.id,{},actor);assert.equal(done.status,'succeeded');assert.equal(emailJobs.filter(j=>j.options.jobId===`refund-${f.refund.id}-succeeded-buyer`).length,0);
+   service.notificationsService.queueEmail=queue;await service.dispatchRefundEmails();await service.dispatchRefundEmails();assert.equal(emailJobs.filter(j=>j.options.jobId===`refund-${f.refund.id}-succeeded-buyer`).length,1);
   }
   // Read-only report uses a repository exposing only reads and a GET-only Stripe mock.
   const {RefundReconciliationService}=require('../dist/refunds/refund-reconciliation.service');

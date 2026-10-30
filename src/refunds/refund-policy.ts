@@ -31,3 +31,27 @@ export function refundBreakdown(order: TicketOrderEntity, reason: RefundReason =
   refundedSubtotal: refundedSubtotal/100, taxPortion: refundedTax/100, refundedFees: refundedFees/100,
   refundAmount: refund/100, totalRetained: (total-refund)/100};
 }
+
+export type RefundAmounts = { tickets: number; serviceFee: number; processingFee: number; tax: number };
+
+/** Admin allocations use the recorded buyer charges, never organizer-paid costs. */
+export function adminRefundBreakdown(order: TicketOrderEntity, reason: RefundReason, amounts?: RefundAmounts) {
+ const policy = refundBreakdown(order, reason);
+ const raw = order.feeSnapshot?.buyerProcessingFee;
+ const processing = raw != null ? Number(raw) : order.feePayer === 'buyer' ? Number(order.processingFee || 0) : order.feePayer === 'organizer' || policy.buyerFees === 0 ? 0 : NaN;
+ if (!Number.isFinite(processing) || processing < 0 || Math.round(processing*100) > Math.round(policy.buyerFees*100)) throw new BadRequestException('Buyer fee allocation requires reconciliation before selecting refund components');
+ const round = (n: number) => Math.round(n*100)/100;
+ const available: RefundAmounts = {tickets: policy.subtotal, serviceFee: round(policy.buyerFees-processing), processingFee: round(processing), tax: policy.tax};
+ const defaultProcessing = policy.retainedProcessingFee > 0 ? 0 : Math.max(round(policy.refundedFees-available.serviceFee), Math.min(available.processingFee, round(available.processingFee*policy.percentage/100), policy.refundedFees));
+ const defaults: RefundAmounts = {tickets: policy.refundedSubtotal, serviceFee: round(policy.refundedFees-defaultProcessing), processingFee: defaultProcessing, tax: policy.taxPortion};
+ const chosen = amounts ?? defaults;
+ for (const key of Object.keys(available) as Array<keyof RefundAmounts>) {
+  const value=chosen[key];
+  if (typeof value!=='number' || !Number.isFinite(value) || value<0 || Math.abs(value*100-Math.round(value*100))>0.000001 || Math.round(value*100)>Math.round(available[key]*100)) throw new BadRequestException(`Invalid ${key} refund amount; it must be between zero and the amount paid`);
+ }
+ const refundCents=(Object.keys(available) as Array<keyof RefundAmounts>).reduce((sum,key)=>sum+Math.round(chosen[key]*100),0);
+ if (refundCents<=0 || refundCents>Math.round(policy.total*100)) throw new BadRequestException('Select a positive refund amount no greater than the original payment');
+ return {...policy, availableComponents: available, refundComponents: {...chosen}, adminOverride: amounts !== undefined,
+  refundedSubtotal: chosen.tickets, taxPortion: chosen.tax, refundedFees: round(chosen.serviceFee+chosen.processingFee),
+  retainedProcessingFee: round(available.processingFee-chosen.processingFee), refundAmount: refundCents/100, totalRetained: round(policy.total-refundCents/100)};
+}
