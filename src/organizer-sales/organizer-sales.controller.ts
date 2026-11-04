@@ -14,6 +14,21 @@ import { OrganizerSalesService } from './organizer-sales.service';
 export class OrganizerSalesController {
 	constructor(private readonly organizerSalesService: OrganizerSalesService) {}
 
+	@Get('metrics')
+	metrics(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
+		return this.organizerSalesService.metrics(organizationId, req.user);
+	}
+
+	@Get('item-breakdown')
+	itemBreakdown(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
+		return this.organizerSalesService.itemBreakdown(organizationId, req.user);
+	}
+
+	@Get('influencer-breakdown')
+	influencerBreakdown(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
+		return this.organizerSalesService.influencerBreakdown(organizationId, req.user);
+	}
+
 	@Get('summary')
 	summary(
 		@Query('organizationId') organizationId: string,

@@ -54,14 +54,36 @@ export class OrganizerSalesService {
 		private readonly notificationsService: NotificationsService,
 	) {}
 
-	async summary(organizationId: string, user: SalesUser) {
+	async metrics(organizationId: string, user: SalesUser) {
+		await this.ensureOrganizationAccess(organizationId, user);
+		return this.salesMetrics(await this.getOrders(organizationId));
+	}
+
+	async itemBreakdown(organizationId: string, user: SalesUser) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		const orders = await this.getOrders(organizationId);
+		const lines = orders.filter((order) => order.status === 'paid').flatMap((order) => this.buildOrderLines(order));
+		return {
+			tickets: this.summarizeLines(lines.filter((line) => line.kind === 'ticket')),
+			merchandise: this.summarizeLines(lines.filter((line) => line.kind === 'merchandise')),
+		};
+	}
+
+	async influencerBreakdown(organizationId: string, user: SalesUser) {
+		await this.ensureOrganizationAccess(organizationId, user);
+		const orders = await this.ticketOrdersRepository.createQueryBuilder('order')
+			.leftJoinAndSelect('order.referralCode', 'referralCode')
+			.where('order.organizationId = :organizationId', { organizationId })
+			.andWhere('order.status = :status', { status: 'paid' })
+			.orderBy('order.paidAt', 'DESC', 'NULLS LAST').addOrderBy('order.createdAt', 'DESC').getMany();
+		return this.summarizeInfluencers(orders);
+	}
+
+	private salesMetrics(orders: TicketOrderEntity[]) {
 		const paidOrders = orders.filter((order) => order.status === 'paid');
 		const pendingOrders = orders.filter((order) => order.status === 'pending');
 		const refundedOrders = orders.filter((order) => order.status === 'refunded');
 		const lines = paidOrders.flatMap((order) => this.buildOrderLines(order));
-		const balance = await this.getAdjustedBalance(organizationId);
 
 		return {
 			currency: paidOrders[0]?.currency || orders[0]?.currency || 'USD',
@@ -85,6 +107,19 @@ export class OrganizerSalesService {
 				refundedOrders: refundedOrders.length,
 				refundedBuyerPaid: this.sum(refundedOrders, (order) => Number(order.total || 0)),
 			},
+		};
+	}
+
+	async summary(organizationId: string, user: SalesUser) {
+		await this.ensureOrganizationAccess(organizationId, user);
+		const [orders, balance] = await Promise.all([this.getOrders(organizationId), this.getAdjustedBalance(organizationId)]);
+		const paidOrders = orders.filter((order) => order.status === 'paid');
+		const pendingOrders = orders.filter((order) => order.status === 'pending');
+		const refundedOrders = orders.filter((order) => order.status === 'refunded');
+		const lines = paidOrders.flatMap((order) => this.buildOrderLines(order));
+
+		return {
+			...this.salesMetrics(orders),
 			balance: {
 				pending: balance.pending,
 				available: balance.available,
@@ -110,7 +145,6 @@ export class OrganizerSalesService {
 			const orders = this.filterOrdersByStatus(await this.getOrders(organizationId), query.status);
 			return orders.map((order) => this.toOrderRow(order));
 		}
-		await this.ledgerService.syncOrganizationOrders(organizationId);
 		const pagination = this.parsePagination(query);
 		const status = this.normalizeOrderStatus(query.status);
 		const builder = this.ticketOrdersRepository
@@ -752,11 +786,18 @@ export class OrganizerSalesService {
 	}
 
 	private async getOrders(organizationId: string) {
-		await this.ledgerService.syncOrganizationOrders(organizationId);
-		return this.ticketOrdersRepository.find({
-			where: { organization: { id: organizationId } },
-			order: { paidAt: 'DESC', createdAt: 'DESC' },
-		});
+		// Sales rows use order snapshots, not ledger balances. Avoid eager-loading
+		// issued tickets and nested event/organization graphs for every order.
+		return this.ticketOrdersRepository.createQueryBuilder('order')
+			.leftJoin('order.organization', 'organization')
+			.leftJoin('order.event', 'event').addSelect(['event.id', 'event.title', 'event.startsAt', 'event.endsAt'])
+			.leftJoin('order.referralCode', 'referralCode').addSelect(['referralCode.id', 'referralCode.code'])
+			.leftJoinAndSelect('order.items', 'items')
+			.leftJoin('items.ticketType', 'ticketType').addSelect('ticketType.id')
+			.where('organization.id = :organizationId', { organizationId })
+			.orderBy('order.paidAt', 'DESC', 'NULLS LAST')
+			.addOrderBy('order.createdAt', 'DESC')
+			.getMany();
 	}
 
 	private parsePagination(query: PaginationQuery) {
