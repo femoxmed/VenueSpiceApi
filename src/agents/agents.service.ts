@@ -7,6 +7,7 @@ import { Role } from '../common/enums/role.enum';
 import { NotificationsService } from '../notifications/notifications.service';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { DiscountCouponEntity } from '../discounts/entities/discount-coupon.entity';
 import { CreateAgentDto } from './dto/create-agent.dto';
 import { AgentEntity } from './entities/agent.entity';
 import { ReferralCodeEntity } from './entities/referral-code.entity';
@@ -53,6 +54,10 @@ export class AgentsService {
 			.leftJoinAndSelect('agent.organization', 'organization')
 			.leftJoinAndSelect('agent.user', 'user')
 			.leftJoinAndSelect('agent.referralCodes', 'referralCodes')
+			.leftJoinAndMapMany('agent.campaigns', DiscountCouponEntity, 'coupon',
+				'coupon.agent = agent.id AND coupon.organization = organization.id')
+			.leftJoin('coupon.event', 'campaignEvent')
+			.addSelect(['campaignEvent.id', 'campaignEvent.title'])
 			.orderBy('agent.createdAt', 'DESC')
 			.skip((pagination.page - 1) * pagination.pageSize)
 			.take(pagination.pageSize);

@@ -1,4 +1,6 @@
-import { ValidationPipe } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import { repairAlbooby10 } from './repairs/albooby10';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -16,6 +18,14 @@ import type { Request, Response, NextFunction } from 'express';
 async function bootstrap() {
 	const app = await NestFactory.create(AppModule, { rawBody: true });
 	const configService = app.get(ConfigService);
+	const repairMode = configService.get<string>('REPAIR_ALBOOBY10', 'off');
+	if (repairMode !== 'off') {
+		try {
+			Logger.log(await repairAlbooby10(app.get(DataSource), repairMode), 'ALBOOBY10 repair');
+		} catch (error) {
+			Logger.error('Repair rolled back or could not be verified; check the audit log before retrying. ' + (error instanceof Error ? error.message : 'Database error'), 'ALBOOBY10 repair');
+		}
+	}
 	const apiPrefix = configService.get<string>('API_PREFIX', 'api');
 	const trustedProxyHops = Number(configService.get<string>('AUTH_TRUST_PROXY_HOPS', '0'));
 	if (!Number.isInteger(trustedProxyHops) || trustedProxyHops < 0 || trustedProxyHops > 5) throw new Error('AUTH_TRUST_PROXY_HOPS must be an integer between 0 and 5');

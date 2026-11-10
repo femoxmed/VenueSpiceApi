@@ -54,3 +54,16 @@ test('unknown codes are rejected instead of silently charging full price',async(
  });
  await assert.rejects(()=>service.prepareCheckout({eventId:'event',referralCode:'UNKNOWN',items:[{ticketTypeId:'ticket',quantity:1}]}),/code was not found/);
 });
+test('clearing the end date removes expiry at checkout; omitting it preserves the original instant', async () => {
+ const {service}=fixture(); const coupon=await service.create(dto);
+ const oldEnd=new Date('2001-01-02T15:23:00Z');
+ Object.assign(coupon,{status:'active',approvedByInfluencerAt:new Date(),startsAt:null,endsAt:oldEnd});
+ service.couponsRepository.findOne=async()=>coupon;
+ await service.update('test',{});assert.equal(coupon.endsAt,oldEnd);
+ await service.update('test',{endsAt:null});assert.equal(coupon.endsAt,null);
+ const checkout=Object.create(TicketOrdersService.prototype);
+ checkout.discountCouponsRepository={findOne:async()=>coupon};
+ assert.equal(await checkout.ensureDiscountCouponCanBeUsed('TEST',coupon.event),coupon);
+ coupon.status='paused';await service.update('test',{endsAt:null});
+ await assert.rejects(()=>checkout.ensureDiscountCouponCanBeUsed('TEST',coupon.event),/paused/);
+});

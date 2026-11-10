@@ -29,10 +29,10 @@ export class UpdateDiscountCouponDto {
 	@IsDateString()
 	startsAt?: string;
 
-	@ApiPropertyOptional({ example: '2026-08-31T23:59:59.000Z' })
+	@ApiPropertyOptional({ type: String, nullable: true, description: 'Null removes expiry; omission preserves it.', example: '2026-08-31T23:59:59.000Z' })
 	@IsOptional()
 	@IsDateString()
-	endsAt?: string;
+	endsAt?: string | null;
 
 	@ApiPropertyOptional({ example: 250 })
 	@IsOptional()

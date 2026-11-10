@@ -358,7 +358,7 @@ export class DiscountsService {
 		}
 
 		const startsAt = dto.startsAt !== undefined ? new Date(dto.startsAt) : coupon.startsAt;
-		const endsAt = dto.endsAt !== undefined ? new Date(dto.endsAt) : coupon.endsAt;
+		const endsAt = dto.endsAt === undefined ? coupon.endsAt : dto.endsAt === null ? null : new Date(dto.endsAt);
 		if (startsAt && endsAt && endsAt < startsAt) {
 			throw new BadRequestException('Coupon expiry date cannot be before start date');
 		}
