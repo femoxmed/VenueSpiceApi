@@ -15,6 +15,7 @@
     "reset:live:dev": "ts-node src/reset-live-data.ts",
     "sync:super-admins": "node dist/sync-super-admins.js",
     "sync:super-admins:dev": "ts-node src/sync-super-admins.ts",
+    "fix:melody-ticket-email": "node scripts/fix-melody-ticket-email.js",
     "typeorm": "typeorm-ts-node-commonjs -d src/database/database.module.ts"
   },
   "dependencies": {
