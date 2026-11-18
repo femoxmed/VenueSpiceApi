@@ -405,6 +405,7 @@ export class EventsService {
 			dateChange,
 			impactedOrderCount,
 			dateChangeConfirmed,
+			adminOverride: Boolean(user && this.isAdminRole(user.role)),
 		});
 		this.validateTicketSalesWindowsForEvent(
 			ticketTypes || event.ticketTypes.map((ticket) => ({
@@ -739,6 +740,7 @@ export class EventsService {
 		dateChange,
 		impactedOrderCount,
 		dateChangeConfirmed,
+		adminOverride,
 	}: {
 		event: EventEntity;
 		nextStartsAt: Date;
@@ -746,6 +748,7 @@ export class EventsService {
 		dateChange: ReturnType<EventsService['getEventDateChange']>;
 		impactedOrderCount: number;
 		dateChangeConfirmed?: boolean;
+		adminOverride?: boolean;
 	}) {
 		if (!dateChange.changed) return;
 
@@ -780,7 +783,7 @@ export class EventsService {
 			throw new BadRequestException('This event has ended. Use the extend flow by setting a later end time.');
 		}
 
-		if (event.status !== 'draft' && impactedOrderCount > 0 && !dateChangeConfirmed) {
+		if (event.status !== 'draft' && impactedOrderCount > 0 && !dateChangeConfirmed && !adminOverride) {
 			throw new BadRequestException(
 				'DATE_CHANGE_CONFIRMATION_REQUIRED: Changing the event date or time may affect ticket holders, refunds, influencer campaigns, and check-in. Buyers will be notified of this change.',
 			);
