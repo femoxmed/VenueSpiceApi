@@ -72,6 +72,9 @@ export class EventEntity {
 	@Column({ name: 'cover_image_url', type: 'text', nullable: true })
 	coverImageUrl?: string | null;
 
+	@Column({ name: 'portrait_image_url', type: 'text', nullable: true })
+	portraitImageUrl?: string | null;
+
 	@Column({ name: 'image_urls', type: 'jsonb', default: () => "'[]'" })
 	imageUrls: string[];
 

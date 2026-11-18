@@ -140,6 +140,10 @@ export class CreateEventDto {
 	coverImageUrl?: string;
 
 	@IsOptional()
+	@IsString()
+	portraitImageUrl?: string;
+
+	@IsOptional()
 	@IsArray()
 	@IsString({ each: true })
 	imageUrls?: string[];
