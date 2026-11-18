@@ -27,6 +27,7 @@ import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity'
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { CheckoutAddOnItemDto, CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
+import { ReassignTicketOrderDto } from './dto/reassign-ticket-order.dto';
 import { PreviewCheckoutFeesDto } from './dto/preview-checkout-fees.dto';
 import { IssuedTicketEntity } from './entities/issued-ticket.entity';
 import { TicketOrderItemEntity } from './entities/ticket-order-item.entity';
@@ -285,6 +286,33 @@ export class TicketOrdersService {
 			),
 			message: 'Your active tickets have been resent to your email.',
 		};
+	}
+
+	async reassignTicketOrder(orderId: string, dto: ReassignTicketOrderDto, actor: { id: string; role: Role }) {
+		const email = dto.email.trim().toLowerCase();
+		const fullName = dto.fullName.trim();
+		const order = await this.ticketOrdersRepository.findOne({ where: { id: orderId }, relations: { tickets: true } });
+		if (!order) throw new NotFoundException('Ticket order not found');
+		if (order.status !== 'paid') throw new BadRequestException('Only paid ticket orders can be reassigned.');
+
+		const user = dto.userId
+			? await this.usersRepository.findOneBy({ id: dto.userId })
+			: await this.usersRepository.findOne({ where: { email } });
+		if (dto.userId && !user) throw new NotFoundException('Target user account not found');
+		order.customerEmail = email;
+		order.customerName = fullName;
+		order.buyerUserId = user?.id ?? null;
+		for (const ticket of order.tickets ?? []) {
+			ticket.holderEmail = email;
+			ticket.holderName = fullName;
+		}
+		await this.ticketOrdersRepository.manager.transaction(async (manager) => {
+			await manager.getRepository(TicketOrderEntity).save(order);
+			if (order.tickets?.length) await manager.getRepository(IssuedTicketEntity).save(order.tickets);
+		});
+		if (dto.sendEmail !== false) await this.findMyTicket({ email });
+		await this.auditService.log('ticket_order.reassigned', actor, 'ticket_order', order.id, { email, fullName, buyerUserId: user?.id ?? null, emailSent: dto.sendEmail !== false });
+		return { orderId: order.id, email, fullName, buyerUserId: user?.id ?? null, emailSent: dto.sendEmail !== false };
 	}
 
 	async createCheckoutSession(dto: CreateCheckoutSessionDto, buyer?: { id: string }) {

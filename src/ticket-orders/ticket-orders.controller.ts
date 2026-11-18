@@ -12,6 +12,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
+import { ReassignTicketOrderDto } from './dto/reassign-ticket-order.dto';
 import { PreviewCheckoutFeesDto } from './dto/preview-checkout-fees.dto';
 import { TicketOrdersService } from './ticket-orders.service';
 
@@ -96,5 +97,13 @@ export class TicketOrdersController {
 	@Get(':id')
 	findOne(@Param('id') id: string) {
 		return this.ticketOrdersService.findOne(id);
+	}
+
+	@ApiBearerAuth()
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Post(':id/reassign')
+	reassign(@Param('id') id: string, @Body() dto: ReassignTicketOrderDto, @Req() req: Request & { user: UserEntity }) {
+		return this.ticketOrdersService.reassignTicketOrder(id, dto, req.user);
 	}
 }
