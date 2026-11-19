@@ -20,6 +20,11 @@ export type PricingSettings = {
 	stripeTaxBehavior: 'exclusive' | 'inclusive' | 'unspecified';
 	supportedTaxRegions: string;
 	allowOrganizerManualTax: boolean;
+	earlyWithdrawalEnabled: boolean;
+	earlyWithdrawalFeePercent: number;
+	standardWithdrawalFeePercent: number;
+	instantWithdrawalFeePercent: number;
+	organizerReservePercent: number;
 };
 
 const settingMap = {
@@ -34,6 +39,11 @@ const settingMap = {
 	stripeTaxBehavior: 'STRIPE_TAX_BEHAVIOR',
 	supportedTaxRegions: 'SUPPORTED_TAX_REGIONS',
 	allowOrganizerManualTax: 'ALLOW_ORGANIZER_MANUAL_TAX',
+	earlyWithdrawalEnabled: 'EARLY_WITHDRAWAL_ENABLED',
+	earlyWithdrawalFeePercent: 'EARLY_WITHDRAWAL_FEE_PERCENT',
+	standardWithdrawalFeePercent: 'STANDARD_WITHDRAWAL_FEE_PERCENT',
+	instantWithdrawalFeePercent: 'INSTANT_WITHDRAWAL_FEE_PERCENT',
+	organizerReservePercent: 'ORGANIZER_RESERVE_PERCENT',
 } satisfies Record<keyof PricingSettings, string>;
 
 const defaults = {
@@ -48,6 +58,11 @@ const defaults = {
 	stripeTaxBehavior: 'exclusive',
 	supportedTaxRegions: 'US:TX',
 	allowOrganizerManualTax: true,
+	earlyWithdrawalEnabled: true,
+	earlyWithdrawalFeePercent: 0.01,
+	standardWithdrawalFeePercent: 0.01,
+	instantWithdrawalFeePercent: 0.03,
+	organizerReservePercent: 0.2,
 } satisfies PricingSettings;
 
 const descriptions: Record<string, string> = {
@@ -62,6 +77,11 @@ const descriptions: Record<string, string> = {
 	STRIPE_TAX_BEHAVIOR: 'Stripe price tax behavior for checkout line items: exclusive, inclusive, or unspecified.',
 	SUPPORTED_TAX_REGIONS: 'Comma-separated country/state regions where Venue Spice collects tax, e.g. US:TX.',
 	ALLOW_ORGANIZER_MANUAL_TAX: 'Allow organizers outside supported tax regions to enter a tax rate after accepting responsibility.',
+	EARLY_WITHDRAWAL_ENABLED: 'Allow organizers to request payout before the normal payout policy hold expires.',
+	EARLY_WITHDRAWAL_FEE_PERCENT: 'Default fee charged on early organizer withdrawals. Use decimal format, e.g. 0.07 for 7%.',
+	STANDARD_WITHDRAWAL_FEE_PERCENT: 'Venue Spice fee for standard organizer withdrawals. Use decimal format, e.g. 0.01 for 1%.',
+	INSTANT_WITHDRAWAL_FEE_PERCENT: 'Venue Spice fee for instant organizer withdrawals. Use decimal format, e.g. 0.03 for 3%.',
+	ORGANIZER_RESERVE_PERCENT: 'Percentage of organizer net earnings held for refunds, disputes, and cancellations. Use decimal format, e.g. 0.2 for 20%.',
 };
 
 @Injectable()
@@ -125,6 +145,11 @@ export class PlatformSettingsService implements OnModuleInit {
 			stripeTaxBehavior: this.taxBehaviorValue(byKey.get(settingMap.stripeTaxBehavior), defaults.stripeTaxBehavior),
 			supportedTaxRegions: byKey.get(settingMap.supportedTaxRegions) ?? defaults.supportedTaxRegions,
 			allowOrganizerManualTax: this.booleanValue(byKey.get(settingMap.allowOrganizerManualTax), defaults.allowOrganizerManualTax),
+			earlyWithdrawalEnabled: this.booleanValue(byKey.get(settingMap.earlyWithdrawalEnabled), defaults.earlyWithdrawalEnabled),
+			earlyWithdrawalFeePercent: this.numberValue(byKey.get(settingMap.earlyWithdrawalFeePercent), defaults.earlyWithdrawalFeePercent),
+			standardWithdrawalFeePercent: this.numberValue(byKey.get(settingMap.standardWithdrawalFeePercent), defaults.standardWithdrawalFeePercent),
+			instantWithdrawalFeePercent: this.numberValue(byKey.get(settingMap.instantWithdrawalFeePercent), defaults.instantWithdrawalFeePercent),
+			organizerReservePercent: this.numberValue(byKey.get(settingMap.organizerReservePercent), defaults.organizerReservePercent),
 		};
 	}
 

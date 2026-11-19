@@ -422,6 +422,23 @@ export class OrganizationsService {
 		return saved;
 	}
 
+	async updateEarlyWithdrawalPolicy(id: string, dto: { enabled: boolean; feePercent?: number; reason?: string }, user?: { id: string; email?: string }, request?: Request) {
+		const organization = await this.findOne(id);
+		const feePercent = dto.feePercent == null ? null : Number(dto.feePercent);
+		if (feePercent != null && (!Number.isFinite(feePercent) || feePercent < 0 || feePercent > 1)) {
+			throw new BadRequestException('Early withdrawal fee must be between 0% and 100%.');
+		}
+		const before = { enabled: organization.earlyWithdrawalEnabled, feePercent: organization.earlyWithdrawalFeePercent, reason: organization.earlyWithdrawalFeeReason };
+		organization.earlyWithdrawalEnabled = Boolean(dto.enabled);
+		organization.earlyWithdrawalFeePercent = feePercent;
+		organization.earlyWithdrawalFeeReason = dto.reason?.trim() || null;
+		organization.earlyWithdrawalApprovedBy = user?.id || null;
+		organization.earlyWithdrawalApprovedAt = new Date();
+		const saved = await this.organizationsRepository.save(organization);
+		await this.auditService.log('organization.early_withdrawal_policy.updated', user, 'organization', saved.id, { before, after: { enabled: saved.earlyWithdrawalEnabled, feePercent: saved.earlyWithdrawalFeePercent, reason: saved.earlyWithdrawalFeeReason } }, {}, request);
+		return this.findOne(saved.id);
+	}
+
 	async checkOrganizerUsernameAvailability(username: string, organizationId?: string) {
 		const normalized = this.normalizeOrganizerUsername(username);
 		const validationMessage = this.validateOrganizerUsername(normalized);
@@ -631,6 +648,11 @@ export class OrganizationsService {
 			payoutPolicyReason: organization.payoutPolicyReason,
 			payoutPolicyRefundRiskAcceptedAt: organization.payoutPolicyRefundRiskAcceptedAt,
 			payoutPolicyRefundRiskAcceptedBy: organization.payoutPolicyRefundRiskAcceptedBy,
+			earlyWithdrawalEnabled: organization.earlyWithdrawalEnabled,
+			earlyWithdrawalFeePercent: organization.earlyWithdrawalFeePercent,
+			earlyWithdrawalFeeReason: organization.earlyWithdrawalFeeReason,
+			earlyWithdrawalApprovedBy: organization.earlyWithdrawalApprovedBy,
+			earlyWithdrawalApprovedAt: organization.earlyWithdrawalApprovedAt,
 		};
 	}
 

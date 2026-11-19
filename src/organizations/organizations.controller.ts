@@ -79,6 +79,17 @@ export class OrganizationsController {
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Patch(':id/early-withdrawal-policy')
+	updateEarlyWithdrawalPolicy(
+		@Param('id') id: string,
+		@Body() dto: { enabled: boolean; feePercent?: number; reason?: string },
+		@Req() req: { user: { id: string; email?: string } },
+	) {
+		return this.organizationsService.updateEarlyWithdrawalPolicy(id, dto, req.user, req as any);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
 	@Get(':id')
 	findOne(@Param('id') id: string) {

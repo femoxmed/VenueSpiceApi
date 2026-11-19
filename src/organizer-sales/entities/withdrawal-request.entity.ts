@@ -17,6 +17,7 @@ export type WithdrawalRequestStatus =
 	| 'rejected'
 	| 'failed'
 	| 'cancelled';
+export type WithdrawalRequestType = 'normal' | 'early' | 'instant';
 
 @Entity('withdrawal_requests')
 export class WithdrawalRequestEntity {
@@ -32,6 +33,21 @@ export class WithdrawalRequestEntity {
 
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount: number;
+
+	@Column({ name: 'withdrawal_type', type: 'varchar', default: 'normal' })
+	withdrawalType: WithdrawalRequestType;
+
+	@Column({ name: 'fee_percent', type: 'decimal', precision: 8, scale: 6, default: 0 })
+	feePercent: number;
+
+	@Column({ name: 'fee_amount', type: 'decimal', precision: 12, scale: 2, default: 0 })
+	feeAmount: number;
+
+	@Column({ name: 'net_amount', type: 'decimal', precision: 12, scale: 2, nullable: true })
+	netAmount?: number | null;
+
+	@Column({ name: 'fee_snapshot', type: 'jsonb', nullable: true })
+	feeSnapshot?: Record<string, unknown> | null;
 
 	@Column({ type: 'varchar', default: 'USD' })
 	currency: string;
@@ -62,6 +78,9 @@ export class WithdrawalRequestEntity {
 
 	@Column({ name: 'stripe_transfer_id', type: 'varchar', nullable: true })
 	stripeTransferId?: string | null;
+
+	@Column({ name: 'stripe_payout_id', type: 'varchar', nullable: true })
+	stripePayoutId?: string | null;
 
 	@Column({ name: 'source_entry_ids', type: 'jsonb', nullable: true })
 	sourceEntryIds?: string[] | null;

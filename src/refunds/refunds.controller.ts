@@ -18,6 +18,13 @@ export class RefundsController {
 
  @UseGuards(JwtAuthGuard, RolesGuard)
  @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Get('requests/:id/diagnostics')
+ diagnose(@Param('id',ParseUUIDPipe) id:string,@Req() req:{user:{role:Role}}) {
+  return this.reconciliation.diagnose(id, req.user);
+ }
+
+ @UseGuards(JwtAuthGuard, RolesGuard)
+ @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
  @Get('reconciliation')
  report(@Query('page',new DefaultValuePipe(1),ParseIntPipe) page:number,@Req() req:{user:{role:Role}}) {
   if(page<1 || page>100000) throw new BadRequestException('Invalid report page');

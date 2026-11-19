@@ -162,6 +162,21 @@ export class OrganizationEntity {
 	@Column({ name: 'payout_policy_refund_risk_accepted_by', type: 'uuid', nullable: true })
 	payoutPolicyRefundRiskAcceptedBy?: string | null;
 
+	@Column({ name: 'early_withdrawal_enabled', type: 'boolean', default: false })
+	earlyWithdrawalEnabled: boolean;
+
+	@Column({ name: 'early_withdrawal_fee_percent', type: 'decimal', precision: 8, scale: 6, nullable: true })
+	earlyWithdrawalFeePercent?: number | null;
+
+	@Column({ name: 'early_withdrawal_fee_reason', type: 'text', nullable: true })
+	earlyWithdrawalFeeReason?: string | null;
+
+	@Column({ name: 'early_withdrawal_approved_by', type: 'uuid', nullable: true })
+	earlyWithdrawalApprovedBy?: string | null;
+
+	@Column({ name: 'early_withdrawal_approved_at', type: 'timestamptz', nullable: true })
+	earlyWithdrawalApprovedAt?: Date | null;
+
 	@OneToMany(() => EventEntity, (event) => event.organization)
 	events: EventEntity[];
 

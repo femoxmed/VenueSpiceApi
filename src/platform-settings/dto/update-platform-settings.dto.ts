@@ -49,4 +49,28 @@ export class UpdatePlatformSettingsDto {
 	@IsOptional()
 	@IsBoolean()
 	allowOrganizerManualTax?: boolean;
+
+	@IsOptional()
+	@IsBoolean()
+	earlyWithdrawalEnabled?: boolean;
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	earlyWithdrawalFeePercent?: number;
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	standardWithdrawalFeePercent?: number;
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	instantWithdrawalFeePercent?: number;
+
+	@IsOptional()
+	@IsNumber()
+	@Min(0)
+	organizerReservePercent?: number;
 }

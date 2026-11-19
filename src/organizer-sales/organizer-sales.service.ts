@@ -8,6 +8,7 @@ import { Role } from '../common/enums/role.enum';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
@@ -52,6 +53,7 @@ export class OrganizerSalesService {
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
 		private readonly notificationsService: NotificationsService,
+		private readonly platformSettingsService: PlatformSettingsService,
 	) {}
 
 	async metrics(organizationId: string, user: SalesUser) {
@@ -268,6 +270,30 @@ export class OrganizerSalesService {
 		return this.getAdjustedBalance(organizationId);
 	}
 
+	async earlyWithdrawalPreview(organizationId: string, user: SalesUser, amount?: number) {
+		const organization = await this.ensureOrganizationAccess(organizationId, user);
+		const pricing = await this.platformSettingsService.getPricingSettings();
+		const balance = await this.ledgerService.getBalance(organizationId);
+		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), pricing.organizerReservePercent);
+		const grossAvailable = this.roundMoney(Math.max(0, Number(balance.available || 0) + Number(balance.pending || 0) - reserved - reserve));
+		const feePercent = organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null
+			? Number(organization.earlyWithdrawalFeePercent)
+			: pricing.earlyWithdrawalFeePercent;
+		const requested = this.roundMoney(Number(amount || grossAvailable));
+		const feeAmount = this.roundMoney(Math.max(0, requested) * feePercent);
+		return {
+			currency: balance.currency || 'USD',
+			amount: requested,
+			grossAvailable,
+			feePercent,
+			feeAmount,
+			netAmount: this.roundMoney(Math.max(0, requested - feeAmount)),
+			feeSource: organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default',
+			earlyWithdrawalEnabled: pricing.earlyWithdrawalEnabled,
+		};
+	}
+
 	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		if (!this.hasPaginationQuery(query)) {
@@ -289,7 +315,7 @@ export class OrganizerSalesService {
 	async requestWithdrawal(
 		organizationId: string,
 		user: SalesUser,
-		payload?: { amount?: number; note?: string },
+		payload?: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean },
 	) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		if (!organization.stripeAccountId) {
@@ -298,10 +324,17 @@ export class OrganizerSalesService {
 		if (!organization.stripePayoutsEnabled && !organization.stripeAccountId.startsWith('acct_mock_')) {
 			throw new BadRequestException('Finish Stripe payout setup before requesting a withdrawal.');
 		}
-		const entries = await this.ledgerService.getWithdrawableEntries(organizationId);
+		const withdrawalType = payload?.withdrawalType === 'instant' ? 'instant' : payload?.withdrawalType === 'early' ? 'early' : 'normal';
+		const pricing = await this.platformSettingsService.getPricingSettings();
+		if (withdrawalType !== 'normal' && !pricing.earlyWithdrawalEnabled) throw new BadRequestException('Early and instant withdrawals are currently disabled.');
+		if (withdrawalType !== 'normal' && payload?.acceptedEarlyWithdrawalFee !== true) throw new BadRequestException('Please accept the withdrawal fee before continuing.');
+		const entries = withdrawalType !== 'normal'
+			? (await this.ledgerService.getOrganizationEntries(organizationId)).filter((entry) => entry.type === 'organizer_net' && ['pending', 'available'].includes(entry.status))
+			: await this.ledgerService.getWithdrawableEntries(organizationId);
 		const grossAvailable = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
-		const available = this.roundMoney(Math.max(0, grossAvailable - reserved));
+		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const available = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
 		const currency = entries[0]?.currency || 'USD';
 		if (!entries.length || available <= 0) {
 			throw new BadRequestException('No available balance to request yet.');
@@ -318,11 +351,22 @@ export class OrganizerSalesService {
 			throw new BadRequestException(`Minimum withdrawal amount is ${this.formatMoney(minimum, currency)}.`);
 		}
 
+		const feePercent = withdrawalType === 'instant'
+			? pricing.instantWithdrawalFeePercent
+			: withdrawalType === 'early'
+				? (organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? Number(organization.earlyWithdrawalFeePercent) : pricing.earlyWithdrawalFeePercent)
+				: 0;
+		const feeAmount = this.roundMoney(amount * feePercent);
 		const request = await this.withdrawalRequestsRepository.save(
 			this.withdrawalRequestsRepository.create({
 				organization,
 				status: 'pending_review',
 				amount,
+				withdrawalType,
+				feePercent,
+				feeAmount,
+				netAmount: this.roundMoney(amount - feeAmount),
+				feeSnapshot: { feePercent, source: withdrawalType === 'early' && organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default', capturedAt: new Date().toISOString() },
 				currency,
 				availableBalanceSnapshot: available,
 				stripeAccountId: organization.stripeAccountId,
@@ -334,6 +378,7 @@ export class OrganizerSalesService {
 					requestedAvailableBalance: available,
 					grossAvailableBalance: grossAvailable,
 					reservedBalance: reserved,
+					riskReserve,
 					sourceEntryCount: entries.length,
 				},
 			}),
@@ -356,6 +401,7 @@ export class OrganizerSalesService {
 				rows: [
 					{ label: 'Organizer', value: organization.name },
 					{ label: 'Amount', value: this.formatMoney(amount, currency) },
+					...(withdrawalType !== 'normal' ? [{ label: `${withdrawalType === 'instant' ? 'Instant' : 'Early'} withdrawal fee`, value: this.formatMoney(feeAmount, currency) }] : [{ label: 'Standard withdrawal fee', value: this.formatMoney(feeAmount, currency) }]),
 					{ label: 'Requested by', value: user.email || organization.contactEmail || 'Unknown' },
 					{ label: 'Available snapshot', value: this.formatMoney(available, currency) },
 				],
@@ -465,13 +511,15 @@ export class OrganizerSalesService {
 			throw new BadRequestException('Organizer Stripe payout setup is not complete.');
 		}
 		const amount = this.roundMoney(Number(request.amount || 0));
+		const feeAmount = this.roundMoney(Number(request.feeAmount || 0));
+		const payoutAmount = this.roundMoney(Number(request.netAmount ?? (amount - feeAmount)));
 		const currency = request.currency || 'USD';
 		if (request.metadata?.beneficiaryType === 'influencer') {
 			return this.payInfluencerWithdrawalRequest(request, user, amount, currency);
 		}
 		const entries = await this.ledgerService.prepareWithdrawableEntries(
 			organization.id,
-			amount,
+			payoutAmount,
 			request.sourceEntryIds ?? undefined,
 		);
 		if (!entries.length) {
@@ -489,7 +537,7 @@ export class OrganizerSalesService {
 			const payout = await this.ledgerService.recordPayoutSuccess(
 				organization.id,
 				entries,
-				amount,
+				payoutAmount,
 				currency,
 				{
 					mode: 'mock',
@@ -509,15 +557,19 @@ export class OrganizerSalesService {
 		}
 
 		try {
-			const transfer = await this.createStripeTransfer(organization.stripeAccountId, amount, currency, organization.id, request.id);
+			const transfer = request.withdrawalType === 'instant'
+				? await this.createStripePayout(organization.stripeAccountId, payoutAmount, currency, organization.id, request.id)
+				: await this.createStripeTransfer(organization.stripeAccountId, payoutAmount, currency, organization.id, request.id);
 			const payout = await this.ledgerService.recordPayoutSuccess(
 				organization.id,
 				entries,
-				amount,
+				payoutAmount,
 				currency,
 				{
-					mode: 'stripe_transfer',
-					stripeTransferId: transfer.id,
+					mode: request.withdrawalType === 'instant' ? 'stripe_instant_payout' : 'stripe_transfer',
+					...(request.withdrawalType === 'instant' ? { stripePayoutId: transfer.id } : { stripeTransferId: transfer.id }),
+					grossAmount: amount,
+					venueSpiceFee: feeAmount,
 					destination: organization.stripeAccountId,
 					stripePayload: transfer,
 					withdrawalRequestId: request.id,
@@ -526,8 +578,9 @@ export class OrganizerSalesService {
 			);
 			request.status = 'paid';
 			request.paidAt = new Date();
-			request.stripeTransferId = transfer.id;
-			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: 'stripe_transfer' };
+			if (request.withdrawalType === 'instant') request.stripePayoutId = transfer.id;
+			else request.stripeTransferId = transfer.id;
+			request.metadata = { ...(request.metadata ?? {}), payoutId: payout?.id, mode: request.withdrawalType === 'instant' ? 'stripe_instant_payout' : 'stripe_transfer' };
 			const saved = await this.withdrawalRequestsRepository.save(request);
 			await this.auditService.log('organizer_withdrawal.paid', user, 'withdrawal_request', saved.id, { amount, currency }, { organizationId: organization.id, stripeTransferId: transfer.id });
 			await this.notifyOrganizerPayoutPaid(saved);
@@ -729,15 +782,25 @@ export class OrganizerSalesService {
 	private async getAdjustedBalance(organizationId: string) {
 		const balance = await this.ledgerService.getBalance(organizationId);
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = Number(balance.available || 0);
-		const withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved));
+		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
 		return {
 			...balance,
 			grossAvailable: this.roundMoney(grossAvailable),
-			reserved: this.roundMoney(reserved),
+			reserved: this.roundMoney(reserved + riskReserve),
+			withdrawalReserved: this.roundMoney(reserved),
+			riskReserve: this.roundMoney(riskReserve),
+			reservePercent: pricing.organizerReservePercent,
 			withdrawable,
 			available: withdrawable,
 		};
+	}
+
+	private calculateRiskReserve(balance: number, reservePercent: number) {
+		const percent = Math.min(1, Math.max(0, Number(reservePercent || 0)));
+		return this.roundMoney(Math.max(0, balance) * percent);
 	}
 
 	private async getReservedWithdrawalAmount(organizationId: string) {
@@ -782,6 +845,37 @@ export class OrganizerSalesService {
 		if (!response.ok || !payload.id) {
 			throw new BadRequestException(payload.error?.message ?? 'Unable to transfer available balance.');
 		}
+		return payload;
+	}
+
+	private async createStripePayout(
+		accountId: string,
+		amount: number,
+		currency: string,
+		organizationId: string,
+		withdrawalRequestId?: string,
+	) {
+		const secretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
+		if (!secretKey) throw new BadRequestException('Stripe is not configured on this server.');
+		const params = new URLSearchParams();
+		params.set('amount', String(Math.round(amount * 100)));
+		params.set('currency', currency.toLowerCase());
+		params.set('method', 'instant');
+		params.set('metadata[organizationId]', organizationId);
+		params.set('metadata[source]', 'venue_spice_instant_withdrawal');
+		if (withdrawalRequestId) params.set('metadata[withdrawalRequestId]', withdrawalRequestId);
+		const response = await fetch('https://api.stripe.com/v1/payouts', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${secretKey}`,
+				'Content-Type': 'application/x-www-form-urlencoded',
+				'Stripe-Account': accountId,
+				'Idempotency-Key': `instant-withdrawal:${withdrawalRequestId || organizationId}:${Math.round(amount * 100)}`,
+			},
+			body: params,
+		});
+		const payload = await response.json() as { id?: string; error?: { message?: string } };
+		if (!response.ok || !payload.id) throw new BadRequestException(payload.error?.message ?? 'Unable to create instant payout.');
 		return payload;
 	}
 
@@ -1110,11 +1204,12 @@ export class OrganizerSalesService {
 			eyebrow: 'Payout sent',
 			title: 'Your payout has been sent',
 			greeting: `Hello ${request.organization?.name || 'there'},`,
-			intro: `Your payout of ${this.formatMoney(Number(request.amount), request.currency)} has been sent.`,
+			intro: `Your payout of ${this.formatMoney(Number(request.netAmount ?? request.amount), request.currency)} has been sent.`,
 			rows: [
-				{ label: 'Amount', value: this.formatMoney(Number(request.amount), request.currency) },
+				{ label: 'Amount sent', value: this.formatMoney(Number(request.netAmount ?? request.amount), request.currency) },
+				...(Number(request.feeAmount || 0) > 0 ? [{ label: 'Venue Spice fee', value: this.formatMoney(Number(request.feeAmount), request.currency) }] : []),
 				{ label: 'Status', value: 'Paid' },
-				{ label: 'Stripe transfer', value: request.stripeTransferId || 'Processed' },
+				{ label: request.stripePayoutId ? 'Stripe payout' : 'Stripe transfer', value: request.stripePayoutId || request.stripeTransferId || 'Processed' },
 			],
 		});
 	}

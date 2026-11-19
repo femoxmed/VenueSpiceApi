@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { AuditLogEntity } from "../audit/entities/audit-log.entity";
+import { In, Repository } from 'typeorm';
 import { Role } from '../common/enums/role.enum';
 import { RefundRequestEntity } from './entities/refund-request.entity';
 
@@ -28,6 +29,24 @@ export class RefundReconciliationService {
   // Bound provider concurrency without writing a report, audit record or refund.
   for(let start=0;start<refunds.length;start+=2) rows.push(...await Promise.all(refunds.slice(start,start+2).map(r=>this.inspect(r))));
   return {generatedAt:new Date().toISOString(),readOnly:true,page,pageSize,total,rows};
+ }
+ async diagnose(id: string, actor: {role: Role}) {
+  this.assertAdmin(actor.role);
+  const refund = await this.refunds.findOneBy({id});
+  if (!refund) throw new NotFoundException('Refund request not found');
+  const [row, approvalAuditFound] = await Promise.all([
+   this.inspect(refund),
+   this.refunds.manager.getRepository(AuditLogEntity).existsBy({entityId:id,entityType:'refund_request',action:In(['refund.approved','refund.admin_initiated'])}),
+  ]);
+  const reviewedAt = refund.reviewedAt;
+  const providerError = refund.providerPayload?.error as {message?:unknown}|undefined;
+  const retry = refund.status !== 'processing' ? 'No automatic processing retry.'
+   : refund.stripeRefundId ? 'Checking existing Stripe refund; no new refund is needed.'
+   : !reviewedAt || Date.now()-reviewedAt.getTime() >= 23*60*60*1000
+    ? 'Automatic creation stopped. Review the original Stripe payment and request logs before taking action.'
+    : 'Within the automatic retry window. Do not issue a second refund.';
+  return {...row, approvalAuditFound, reviewedAt:reviewedAt ?? null,
+   providerError:typeof providerError?.message === 'string' ? providerError.message : null, retry};
  }
  private async inspect(refund: RefundRequestEntity) {
   const paymentId=refund.order?.stripePaymentIntentId;
