@@ -115,8 +115,8 @@ export class OrganizerSalesController {
 	}
 
 	@Get('withdrawal-requests/preview')
-	withdrawalPreview(@Query('organizationId') organizationId: string, @Query('amount') amount: string, @Query('withdrawalType') withdrawalType: 'normal' | 'instant' | undefined, @Req() req: { user: { id: string; email?: string; role: Role } }) {
-		return this.organizerSalesService.withdrawalPreview(organizationId, req.user, Number(amount), withdrawalType === 'instant' ? 'instant' : 'normal');
+	withdrawalPreview(@Query('organizationId') organizationId: string, @Query('amount') amount: string, @Query('withdrawalType') withdrawalType: 'normal' | 'early' | 'instant' | undefined, @Req() req: { user: { id: string; email?: string; role: Role } }) {
+		return this.organizerSalesService.withdrawalPreview(organizationId, req.user, Number(amount), withdrawalType === 'instant' ? 'instant' : withdrawalType === 'early' ? 'early' : 'normal');
 	}
 
 	@Post('withdrawal-requests')
@@ -184,5 +184,37 @@ export class OrganizerSalesController {
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
 		return this.organizerSalesService.payWithdrawalRequest(id, req.user);
+	}
+
+	@Get('admin/organizations/:id/reconciliation')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	inspectOrganizationReconciliation(@Param('id') id: string) {
+		return this.organizerSalesService.inspectOrganizationBalanceReconciliation(id);
+	}
+
+	@Post('admin/organizations/:id/reconcile')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	applyOrganizationReconciliation(
+		@Param('id') id: string,
+		@Body() body: { note: string; overrideAmount?: number },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.applyOrganizationBalanceReconciliation(id, req.user, body);
+	}
+
+	@Get('admin/users/:id/reconciliation')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	inspectUserReconciliation(@Param('id') id: string) {
+		return this.organizerSalesService.inspectUserBalanceReconciliation(id);
+	}
+
+	@Post('admin/users/:id/reconcile')
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	applyUserReconciliation(
+		@Param('id') id: string,
+		@Body() body: { note: string; organizationId?: string; overrideAmount?: number },
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.applyUserBalanceReconciliation(id, req.user, body);
 	}
 }

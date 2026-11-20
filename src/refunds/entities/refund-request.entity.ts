@@ -30,7 +30,7 @@ export class RefundRequestEntity {
 	reason?: string | null;
 
 	@Column({ type: 'varchar', default: 'requested' })
-	status: 'requested' | 'approved' | 'processing' | 'succeeded' | 'declined' | 'failed';
+	status: 'requested' | 'approved' | 'processing' | 'succeeded' | 'declined' | 'failed' | 'manually_reconciled' | 'cancelled';
 
 	@Column({ type: 'decimal', precision: 12, scale: 2 })
 	amount: number;
@@ -58,6 +58,9 @@ export class RefundRequestEntity {
 
 	@Column({ name: 'reviewed_at', type: 'timestamptz', nullable: true })
 	reviewedAt?: Date | null;
+
+	@Column({ name: 'reconciliation_method', type: 'varchar', nullable: true })
+	reconciliationMethod?: 'stripe' | 'external' | null;
 
 	@Column({ name: 'completed_at', type: 'timestamptz', nullable: true })
 	completedAt?: Date | null;

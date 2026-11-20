@@ -30,6 +30,12 @@ export class RefundsController {
   if(page<1 || page>100000) throw new BadRequestException('Invalid report page');
   return this.reconciliation.report(page,req.user);
  }
+ @UseGuards(JwtAuthGuard, RolesGuard) @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Post('requests/:id/reconcile-stripe') reconcileStripe(@Param('id',ParseUUIDPipe) id:string,@Req() req:{user:{id:string;role:Role;email?:string}}){return this.reconciliation.reconcileStripe(id,req.user);}
+ @UseGuards(JwtAuthGuard, RolesGuard) @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Post('requests/:id/reconcile-external') reconcileExternal(@Param('id',ParseUUIDPipe) id:string,@Body() body:{amount:number;method:string;reference?:string;note?:string},@Req() req:{user:{id:string;role:Role;email?:string}}){return this.reconciliation.manuallyReconcile(id,req.user,body);}
+ @UseGuards(JwtAuthGuard, RolesGuard) @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
+ @Post('requests/:id/cancel') cancel(@Param('id',ParseUUIDPipe) id:string,@Body() body:{reason:string},@Req() req:{user:{id:string;role:Role;email?:string}}){return this.reconciliation.cancel(id,req.user,body.reason);}
  @UseGuards(JwtAuthGuard, RolesGuard)
  @Roles(Role.SUPER_ADMIN,Role.PLATFORM_ADMIN,Role.ADMIN)
  @Get('admin-preview/:orderId')

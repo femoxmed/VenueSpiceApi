@@ -2,6 +2,7 @@ import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { AuditLogEntity } from "../audit/entities/audit-log.entity";
+import { AuditService } from '../audit/audit.service';
 import { In, Repository } from 'typeorm';
 import { Role } from '../common/enums/role.enum';
 import { RefundRequestEntity } from './entities/refund-request.entity';
@@ -10,7 +11,7 @@ type ProviderRefund = { id: string; status: string; amount: number; currency: st
 
 @Injectable()
 export class RefundReconciliationService {
- constructor(@InjectRepository(RefundRequestEntity) private readonly refunds: Repository<RefundRequestEntity>, private readonly config: ConfigService) {}
+ constructor(@InjectRepository(RefundRequestEntity) private readonly refunds: Repository<RefundRequestEntity>, private readonly config: ConfigService, private readonly auditService: AuditService) {}
  private assertAdmin(role: Role) {
   if (![Role.ADMIN,Role.PLATFORM_ADMIN,Role.SUPER_ADMIN].includes(role)) throw new ForbiddenException('Platform administrator access required');
  }
@@ -48,6 +49,22 @@ export class RefundReconciliationService {
   return {...row, approvalAuditFound, reviewedAt:reviewedAt ?? null,
    providerError:typeof providerError?.message === 'string' ? providerError.message : null, retry};
  }
+
+ async reconcileStripe(id: string, actor: {id:string;role:Role;email?:string}) {
+  this.assertAdmin(actor.role); const refund=await this.refunds.findOne({where:{id}}); if(!refund) throw new NotFoundException('Refund request not found');
+  const row=await this.inspect(refund); if(row.finding!=='matched') return {updated:false,...row};
+  refund.status='succeeded'; refund.reconciliationMethod='stripe'; refund.completedAt=refund.completedAt||new Date(); refund.stripeRefundId=refund.stripeRefundId||row.providerRefunds[0]?.id||null;
+  const saved=await this.refunds.save(refund); await this.auditService.log('refund.reconciled_stripe',actor,'refund_request',id,{status:saved.status},{providerRefundId:saved.stripeRefundId}); return {updated:true,request:saved,diagnosis:row};
+ }
+
+ async manuallyReconcile(id: string, actor: {id:string;role:Role;email?:string}, payload:{amount:number;method:string;reference?:string;note?:string}) {
+  this.assertAdmin(actor.role); const refund=await this.refunds.findOne({where:{id}}); if(!refund) throw new NotFoundException('Refund request not found');
+  if(Number(payload.amount)!==Number(refund.amount)) throw new Error('External refund amount must match the requested amount.');
+  refund.status='manually_reconciled'; refund.reconciliationMethod='external'; refund.completedAt=new Date(); refund.reviewedById=actor.id; refund.reviewedAt=new Date(); refund.reviewNote=payload.note||null; refund.providerPayload={...(refund.providerPayload||{}),externalRefund:{amount:payload.amount,method:payload.method,reference:payload.reference||null,note:payload.note||null}};
+  const saved=await this.refunds.save(refund); await this.auditService.log('refund.reconciled_external',actor,'refund_request',id,{status:saved.status},{externalRefund:refund.providerPayload.externalRefund}); return saved;
+ }
+
+ async cancel(id:string, actor:{id:string;role:Role;email?:string}, reason:string) { this.assertAdmin(actor.role); const refund=await this.refunds.findOne({where:{id}}); if(!refund) throw new NotFoundException('Refund request not found'); if(['succeeded','manually_reconciled'].includes(refund.status)) throw new Error('Completed refunds cannot be cancelled.'); refund.status='cancelled'; refund.reviewedById=actor.id; refund.reviewedAt=new Date(); refund.reviewNote=reason; const saved=await this.refunds.save(refund); await this.auditService.log('refund.cancelled',actor,'refund_request',id,{status:saved.status},{reason}); return saved; }
  private async inspect(refund: RefundRequestEntity) {
   const paymentId=refund.order?.stripePaymentIntentId;
   const base={id:refund.id,orderId:refund.orderId,customerEmail:refund.customerEmail,eventTitle:refund.order?.event?.title || '',localStatus:refund.status,localAmount:Number(refund.amount),currency:refund.currency,localRefundId:refund.stripeRefundId || null,paymentId:paymentId || null};

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThanOrEqual, Repository } from 'typeorm';
@@ -6,6 +6,9 @@ import { AuditService } from '../audit/audit.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { EventEntity } from '../events/entities/event.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { OrganizationEntity } from '../organizations/entities/organization.entity';
+import { WithdrawalRequestEntity } from '../organizer-sales/entities/withdrawal-request.entity';
+import { RefundRequestEntity } from '../refunds/entities/refund-request.entity';
 import {
 	FinancialLedgerEntryEntity,
 	FinancialLedgerEntryStatus,
@@ -21,6 +24,12 @@ export class FinancialLedgerService {
 		private readonly ledgerRepository: Repository<FinancialLedgerEntryEntity>,
 		@InjectRepository(TicketOrderEntity)
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
+		@InjectRepository(OrganizationEntity)
+		private readonly organizationRepository: Repository<OrganizationEntity>,
+		@InjectRepository(WithdrawalRequestEntity)
+		private readonly withdrawalRequestsRepository: Repository<WithdrawalRequestEntity>,
+		@InjectRepository(RefundRequestEntity)
+		private readonly refundsRepository: Repository<RefundRequestEntity>,
 		private readonly platformSettingsService: PlatformSettingsService,
 		private readonly auditService: AuditService,
 	) {}
@@ -185,15 +194,15 @@ export class FinancialLedgerService {
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.status = 'reversed' OR entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
+			.addSelect('MIN(entry.currency)', 'currency')
 			.where('entry.organizationId = :organizationId', { organizationId })
 			.getRawOne<{ pending: string; available: string; legacyPaidOut: string; recordedPayouts: string; reversed: string }>();
-		const currencyRow = await this.ledgerRepository.findOne({ where: { organization: { id: organizationId } }, select: ['currency'] });
 		const pending = Number(totals?.pending || 0);
 		const available = Number(totals?.available || 0);
 		const paidOut = Number(totals?.legacyPaidOut || 0) + Number(totals?.recordedPayouts || 0);
 		const reversed = Number(totals?.reversed || 0);
 		return {
-			currency: currencyRow?.currency || 'USD',
+			currency: (totals as { currency?: string })?.currency || 'USD',
 			pending: this.roundMoney(pending),
 			available: this.roundMoney(available),
 			paidOut: this.roundMoney(paidOut),
@@ -556,5 +565,271 @@ export class FinancialLedgerService {
 		if (!value) return null;
 		const date = value instanceof Date ? value : new Date(value);
 		return Number.isFinite(date.getTime()) ? date : null;
+	}
+
+	async inspectOrganizationBalanceReconciliation(organizationId: string) {
+		const organization = await this.organizationRepository.findOne({ where: { id: organizationId } });
+		if (!organization) {
+			throw new NotFoundException(`Organization with id "${organizationId}" was not found.`);
+		}
+
+		await this.syncOrganizationOrders(organizationId);
+		await this.releaseAvailableEntries(organizationId);
+
+		const currentBalance = await this.getBalance(organizationId, { synchronize: false });
+
+		const paidOrders = await this.ticketOrdersRepository.find({
+			where: { organization: { id: organizationId } },
+			relations: { event: true },
+			order: { paidAt: 'ASC', createdAt: 'ASC' },
+		});
+
+		let ordersGross = 0;
+		let ordersPlatformFee = 0;
+		let ordersProcessingFee = 0;
+		let ordersInfluencerCommission = 0;
+		let ordersTax = 0;
+		let ordersOrganizerNetTotal = 0;
+		let ordersRefundedTotal = 0;
+		let completedPaidOrdersCount = 0;
+		let refundedOrdersCount = 0;
+
+		const orderIds: string[] = [];
+
+		for (const order of paidOrders) {
+			orderIds.push(order.id);
+			if (order.status === 'paid') {
+				completedPaidOrdersCount++;
+				ordersGross += Number(order.subtotal || 0);
+				ordersPlatformFee += Number(order.platformFee || 0);
+				ordersProcessingFee += Number(order.processingFee || 0);
+				ordersInfluencerCommission += this.feeSnapshotNumber(order, 'influencerCommission', 0);
+				ordersTax += Number(order.tax || 0);
+				ordersOrganizerNetTotal += Number(order.organizerNet || 0);
+			} else if (order.status === 'refunded') {
+				refundedOrdersCount++;
+				ordersRefundedTotal += Number(order.organizerNet || 0);
+			}
+		}
+
+		// Account for partial and item refunds on paid orders
+		let partialRefundsCount = 0;
+		let partialRefundsDeduction = 0;
+		if (orderIds.length > 0) {
+			const successfulRefunds = await this.refundsRepository.createQueryBuilder('refund')
+				.where('refund.orderId IN (:...orderIds)', { orderIds })
+				.andWhere("refund.status IN ('succeeded', 'manually_reconciled')")
+				.getMany();
+
+			for (const refund of successfulRefunds) {
+				const matchingOrder = paidOrders.find((o) => o.id === refund.orderId);
+				// If order is already status='refunded', its full net was already excluded from ordersOrganizerNetTotal
+				if (matchingOrder && matchingOrder.status === 'paid') {
+					partialRefundsCount++;
+					// The organizer net deduction for this refund
+					const snapshot = refund.policySnapshot as any;
+					const deductedNet = snapshot?.refundedSubtotal != null
+						? Number(snapshot.refundedSubtotal)
+						: Number(refund.amount || 0);
+					partialRefundsDeduction += deductedNet;
+				}
+			}
+		}
+
+		ordersGross = this.roundMoney(ordersGross);
+		ordersPlatformFee = this.roundMoney(ordersPlatformFee);
+		ordersProcessingFee = this.roundMoney(ordersProcessingFee);
+		ordersInfluencerCommission = this.roundMoney(ordersInfluencerCommission);
+		ordersTax = this.roundMoney(ordersTax);
+		ordersOrganizerNetTotal = this.roundMoney(ordersOrganizerNetTotal - partialRefundsDeduction);
+		ordersRefundedTotal = this.roundMoney(ordersRefundedTotal + partialRefundsDeduction);
+
+		const expectedNetEarnings = this.roundMoney(ordersOrganizerNetTotal);
+
+		const rawLedgerStats = await this.ledgerRepository.createQueryBuilder('entry')
+			.select("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'pending' THEN entry.amount ELSE 0 END), 0)", 'pending')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status IN ('pending', 'processing') THEN ABS(entry.amount) ELSE 0 END), 0)", 'pendingPayouts')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.status = 'reversed' OR entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
+			.addSelect("COALESCE(SUM(CASE WHEN (entry.metadata->>'isReconciliationAdjustment') = 'true' THEN entry.amount ELSE 0 END), 0)", 'previousAdjustments')
+			.where('entry.organizationId = :organizationId', { organizationId })
+			.getRawOne<{
+				available: string;
+				pending: string;
+				legacyPaidOut: string;
+				recordedPayouts: string;
+				pendingPayouts: string;
+				reversed: string;
+				previousAdjustments: string;
+			}>();
+
+		const ledgerAvailable = this.roundMoney(Number(rawLedgerStats?.available || 0));
+		const ledgerPending = this.roundMoney(Number(rawLedgerStats?.pending || 0));
+		const ledgerPaidOut = this.roundMoney(Number(rawLedgerStats?.legacyPaidOut || 0) + Number(rawLedgerStats?.recordedPayouts || 0));
+		const ledgerReversed = this.roundMoney(Number(rawLedgerStats?.reversed || 0));
+		const ledgerTotalEarned = this.roundMoney(ledgerAvailable + ledgerPending + ledgerPaidOut);
+		const previousAdjustmentsTotal = this.roundMoney(Number(rawLedgerStats?.previousAdjustments || 0));
+
+		const paidWithdrawals = await this.withdrawalRequestsRepository.find({
+			where: { organization: { id: organizationId }, status: 'paid' },
+		});
+		const withdrawalPaidOutTotal = this.roundMoney(
+			paidWithdrawals.reduce((sum, req) => sum + Number(req.netAmount ?? (Number(req.amount || 0) - Number(req.feeAmount || 0))), 0),
+		);
+
+		const pendingWithdrawals = await this.withdrawalRequestsRepository.find({
+			where: { organization: { id: organizationId } },
+		});
+		const inFlightWithdrawals = pendingWithdrawals.filter((w) => ['pending_review', 'approved', 'processing'].includes(w.status));
+		const inFlightWithdrawalTotal = this.roundMoney(
+			inFlightWithdrawals.reduce((sum, req) => sum + Number(req.amount || 0), 0),
+		);
+
+		const discrepancy = this.roundMoney(expectedNetEarnings - ledgerTotalEarned);
+		const isConsistent = Math.abs(discrepancy) < 0.01;
+
+		return {
+			organizationId: organization.id,
+			organizationName: organization.name,
+			organizationSlug: organization.slug,
+			organizationType: organization.type,
+			currency: 'USD',
+			isConsistent,
+			discrepancy,
+			currentBalance: {
+				available: currentBalance.available,
+				pending: currentBalance.pending,
+				paidOut: currentBalance.paidOut,
+				reversed: currentBalance.reversed,
+				totalEarned: currentBalance.totalEarned,
+			},
+			orderHistorySummary: {
+				completedPaidOrdersCount,
+				refundedOrdersCount,
+				partialRefundsCount,
+				partialRefundsDeduction: this.roundMoney(partialRefundsDeduction),
+				grossSales: ordersGross,
+				platformFees: ordersPlatformFee,
+				processingFees: ordersProcessingFee,
+				influencerCommissions: ordersInfluencerCommission,
+				taxes: ordersTax,
+				netEarnings: expectedNetEarnings,
+				refundedNet: ordersRefundedTotal,
+			},
+			ledgerSummary: {
+				available: ledgerAvailable,
+				pending: ledgerPending,
+				paidOut: ledgerPaidOut,
+				reversed: ledgerReversed,
+				totalEarned: ledgerTotalEarned,
+				previousAdjustmentsTotal,
+			},
+			payoutSummary: {
+				completedWithdrawalsCount: paidWithdrawals.length,
+				totalPaidOutViaWithdrawals: withdrawalPaidOutTotal,
+				inFlightWithdrawalsCount: inFlightWithdrawals.length,
+				inFlightWithdrawalTotal,
+			},
+			recommendedAdjustment: isConsistent
+				? null
+				: {
+						amount: discrepancy,
+						targetStatus: 'available' as FinancialLedgerEntryStatus,
+						action: discrepancy > 0 ? 'credit' : 'debit',
+						suggestedReason: `Reconcile balance discrepancy of ${discrepancy > 0 ? '+' : ''}${discrepancy.toFixed(2)} between completed order net history (${expectedNetEarnings.toFixed(2)}) and financial ledger balance (${ledgerTotalEarned.toFixed(2)}).`,
+					},
+		};
+	}
+
+	async applyOrganizationBalanceReconciliation(
+		organizationId: string,
+		payload: { note: string; overrideAmount?: number },
+		actor?: { id?: string; email?: string; role?: string },
+	) {
+		const note = payload?.note?.trim();
+		if (!note || note.length < 5) {
+			throw new BadRequestException('A descriptive admin reason / note (at least 5 characters) is required to record in the audit log.');
+		}
+
+		return this.ledgerRepository.manager.transaction(async (transactionManager) => {
+			const organization = await transactionManager.findOne(OrganizationEntity, {
+				where: { id: organizationId },
+			});
+			if (!organization) {
+				throw new NotFoundException(`Organization with id "${organizationId}" was not found.`);
+			}
+
+			// Fresh inspection inside transaction to prevent race conditions
+			const beforeInspection = await this.inspectOrganizationBalanceReconciliation(organizationId);
+			const adjustmentAmount = typeof payload.overrideAmount === 'number' && Number.isFinite(payload.overrideAmount)
+				? this.roundMoney(payload.overrideAmount)
+				: beforeInspection.discrepancy;
+
+			if (Math.abs(adjustmentAmount) < 0.01) {
+				throw new BadRequestException('Balance is already consistent. No adjustment entry is required.');
+			}
+
+			const now = new Date();
+			const idempotencyKey = `reconciliation-adjustment:${organizationId}:${Date.now()}`;
+			const adjustmentEntry = transactionManager.create(FinancialLedgerEntryEntity, {
+				idempotencyKey,
+				organization,
+				type: 'organizer_net',
+				amount: adjustmentAmount,
+				status: 'available',
+				currency: 'USD',
+				availableAt: now,
+				metadata: {
+					isReconciliationAdjustment: true,
+					reconciliationReason: note,
+					reconciledByUserId: actor?.id,
+					reconciledByUserEmail: actor?.email,
+					beforeBalance: beforeInspection.currentBalance,
+					discrepancy: beforeInspection.discrepancy,
+					orderNetTotal: beforeInspection.orderHistorySummary.netEarnings,
+					resultingAvailableBalance: this.roundMoney(beforeInspection.currentBalance.available + adjustmentAmount),
+					appliedAt: now.toISOString(),
+				},
+			});
+
+			const savedAdjustment = await transactionManager.save(FinancialLedgerEntryEntity, adjustmentEntry);
+
+			await this.releaseAvailableEntries(organizationId);
+			const afterBalance = await this.getBalance(organizationId, { synchronize: false });
+
+			await this.auditService.log(
+				'user_balance.reconciled',
+				actor,
+				'organization',
+				organizationId,
+				{
+					before: beforeInspection.currentBalance,
+					after: afterBalance,
+					adjustmentAmount,
+					resultingAvailable: afterBalance.available,
+					isNegativeBalance: afterBalance.available < 0,
+					entryId: savedAdjustment.id,
+				},
+				{
+					organizationId,
+					organizationName: organization.name,
+					reason: note,
+					discrepancy: beforeInspection.discrepancy,
+					orderNetTotal: beforeInspection.orderHistorySummary.netEarnings,
+				},
+			);
+
+			return {
+				success: true,
+				adjustmentEntry: savedAdjustment,
+				previousBalance: beforeInspection.currentBalance,
+				updatedBalance: afterBalance,
+				adjustmentAmount,
+				isNegativeBalance: afterBalance.available < 0,
+				note,
+			};
+		});
 	}
 }

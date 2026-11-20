@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, In, Repository } from 'typeorm';
@@ -36,6 +36,7 @@ type SalesLine = {
 
 @Injectable()
 export class OrganizerSalesService {
+	private readonly logger = new Logger(OrganizerSalesService.name);
 	constructor(
 		@InjectRepository(UserEntity)
 		private readonly usersRepository: Repository<UserEntity>,
@@ -294,18 +295,21 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'instant' = 'normal') {
+	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'early' | 'instant' = 'normal') {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const balance = await this.getAdjustedBalance(organizationId);
+		const balance = withdrawalType === 'normal' ? await this.getAdjustedBalance(organizationId) : await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const requested = this.roundMoney(Number(amount || 0));
-		const free = this.roundMoney(Number(balance.withdrawable || 0));
-		const early = this.roundMoney(Math.max(0, Number(balance.grossAvailable || 0) - Number(balance.reserved || 0) - free));
-		const earlyRelease = requested > free;
+		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
+		const grossAvailable = this.roundMoney(Number(balance.available || 0) + (withdrawalType === 'normal' ? 0 : Number(balance.pending || 0)));
+		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const free = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
+		const early = withdrawalType === 'normal' ? 0 : this.roundMoney(Math.max(0, free - this.roundMoney(Number((await this.getAdjustedBalance(organizationId)).withdrawable || 0))));
+		const earlyRelease = withdrawalType !== 'normal' || requested > free;
 		const feePercent = earlyRelease ? (withdrawalType === 'instant' ? pricing.instantWithdrawalFeePercent : pricing.standardWithdrawalFeePercent) : 0;
 		const feeAmount = this.roundMoney(requested * feePercent);
-		const snapshot = `${organizationId}:${requested}:${free}:${Number(balance.reserved || 0)}:${withdrawalType}`;
-		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: balance.reserved, withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url') };
+		const snapshot = `${organizationId}:${requested}:${free}:${reserved}:${riskReserve}:${withdrawalType}`;
+		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: this.roundMoney(reserved + riskReserve), withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url') };
 	}
 
 	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
@@ -342,20 +346,30 @@ export class OrganizerSalesService {
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		if (withdrawalType !== 'normal' && !pricing.earlyWithdrawalEnabled) throw new BadRequestException('Early and instant withdrawals are currently disabled.');
 		if (withdrawalType !== 'normal' && payload?.acceptedEarlyWithdrawalFee !== true) throw new BadRequestException('Please accept the withdrawal fee before continuing.');
+		// Early/instant requests only need the aggregate pending+available balance;
+		// avoid materializing the entire ledger in the API process. Payment-time
+		// reservation re-reads the concrete entries transactionally.
 		const entries = withdrawalType !== 'normal'
-			? (await this.ledgerService.getOrganizationEntries(organizationId)).filter((entry) => entry.type === 'organizer_net' && ['pending', 'available'].includes(entry.status))
-			: await this.ledgerService.getWithdrawableEntries(organizationId);
-		const grossAvailable = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+			? (() => {
+				const balance = this.ledgerService.getBalance(organizationId, { synchronize: false });
+				return balance;
+			})()
+			: this.ledgerService.getWithdrawableEntries(organizationId);
+		const earlyBalance: any = withdrawalType !== 'normal' ? await entries : null;
+		const ledgerEntries = withdrawalType !== 'normal' ? [] : entries;
+		const grossAvailable = withdrawalType !== 'normal'
+			? this.roundMoney(Number(earlyBalance?.pending || 0) + Number(earlyBalance?.available || 0))
+			: this.roundMoney((ledgerEntries as any[]).reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
 		const available = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
-		const currency = entries[0]?.currency || 'USD';
-		if (!entries.length || available <= 0) {
+		const currency = earlyBalance?.currency || (ledgerEntries as any[])[0]?.currency || 'USD';
+		if ((withdrawalType === 'normal' && !(ledgerEntries as any[]).length) || available <= 0) {
 			throw new BadRequestException('No available balance to request yet.');
 		}
 		const amount = this.roundMoney(Number(payload?.amount || available));
 		if (payload?.previewToken) {
-			const fresh = await this.withdrawalPreview(organizationId, user, amount, withdrawalType === 'instant' ? 'instant' : 'normal');
+			const fresh = await this.withdrawalPreview(organizationId, user, amount, withdrawalType);
 			if (fresh.previewToken !== payload.previewToken) throw new BadRequestException('Your balance or withdrawal terms changed. Please review and confirm again.');
 		}
 		if (!Number.isFinite(amount) || amount <= 0) {
@@ -391,13 +405,16 @@ export class OrganizerSalesService {
 				requestedByUserId: user.id,
 				requestedByEmail: user.email,
 				requesterNote: payload?.note?.trim() || null,
-				sourceEntryIds: entries.map((entry) => entry.id),
+				// Early/instant requests may span a very large pending ledger. Those IDs are
+				// not needed when the admin later pays the request (payment re-selects
+				// withdrawable entries), so do not serialize an unbounded array into JSON.
+				sourceEntryIds: withdrawalType === 'normal' ? (ledgerEntries as any[]).map((entry) => entry.id) : [],
 				metadata: {
 					requestedAvailableBalance: available,
 					grossAvailableBalance: grossAvailable,
 					reservedBalance: reserved,
 					riskReserve,
-					sourceEntryCount: entries.length,
+					sourceEntryCount: (ledgerEntries as any[]).length,
 				},
 			}),
 		);
@@ -409,7 +426,10 @@ export class OrganizerSalesService {
 			{ amount, currency, organizationId },
 			{ organizationId, availableBalanceSnapshot: available },
 		);
-		await this.notifyAdmins(
+		// Notifications are deliberately detached from the request path. Email rendering
+		// and provider retries must never keep a withdrawal request open or take down the
+		// API process after the database record has been committed.
+		void this.notifyAdmins(
 			'New Venue Spice withdrawal request',
 			{
 				eyebrow: 'Withdrawal request',
@@ -425,8 +445,8 @@ export class OrganizerSalesService {
 				],
 				action: { label: 'Review withdrawals', url: this.adminUrl('/withdrawals') },
 			},
-		);
-		await this.notifyOrganizer(
+		).catch((error) => this.logger.warn(`Withdrawal admin notification failed: ${error instanceof Error ? error.message : String(error)}`));
+		void this.notifyOrganizer(
 			organization,
 			user.email,
 			'Your Venue Spice withdrawal request was submitted',
@@ -441,7 +461,7 @@ export class OrganizerSalesService {
 				],
 				action: { label: 'Open account page', url: this.webUrl('/dashboard/account') },
 			},
-		);
+		).catch((error) => this.logger.warn(`Withdrawal organizer notification failed: ${error instanceof Error ? error.message : String(error)}`));
 		return request;
 	}
 
@@ -452,10 +472,171 @@ export class OrganizerSalesService {
 		});
 	}
 
+	async inspectOrganizationBalanceReconciliation(organizationId: string) {
+		return this.ledgerService.inspectOrganizationBalanceReconciliation(organizationId);
+	}
+
+	async applyOrganizationBalanceReconciliation(
+		organizationId: string,
+		user: SalesUser,
+		payload: { note: string; overrideAmount?: number },
+	) {
+		return this.ledgerService.applyOrganizationBalanceReconciliation(organizationId, payload, user);
+	}
+
+	async inspectUserBalanceReconciliation(userId: string) {
+		const user = await this.usersRepository.findOne({ where: { id: userId } });
+		if (!user) {
+			throw new NotFoundException(`User with id "${userId}" was not found.`);
+		}
+
+		// Find directly owned organizations
+		const ownedOrganizations = await this.organizationsRepository.find({
+			where: { ownerUserId: userId },
+			order: { createdAt: 'DESC' },
+		});
+
+		// Find organizations where user is an active member
+		const memberships = await this.organizationMembersRepository.find({
+			where: { userId, status: 'active' },
+			relations: { organization: true },
+		});
+
+		const membershipOrganizations = memberships
+			.map((m) => m.organization)
+			.filter((org): org is OrganizationEntity => Boolean(org));
+
+		// Combine unique organizations
+		const orgMap = new Map<string, OrganizationEntity>();
+		for (const org of ownedOrganizations) {
+			orgMap.set(org.id, org);
+		}
+		for (const org of membershipOrganizations) {
+			if (!orgMap.has(org.id)) {
+				orgMap.set(org.id, org);
+			}
+		}
+
+		const organizations = Array.from(orgMap.values());
+
+		const reconciliations = await Promise.all(
+			organizations.map(async (org) => {
+				const inspection = await this.ledgerService.inspectOrganizationBalanceReconciliation(org.id);
+				const isOwner = org.ownerUserId === userId;
+				const memberRole = memberships.find((m) => m.organizationId === org.id)?.role;
+				return {
+					...inspection,
+					userRelationship: isOwner ? 'owner' : (`member_${memberRole || 'staff'}`),
+				};
+			}),
+		);
+
+		const totalDiscrepancy = this.roundMoney(
+			reconciliations.reduce((sum, item) => sum + item.discrepancy, 0),
+		);
+		const allConsistent = reconciliations.every((item) => item.isConsistent);
+
+		return {
+			user: {
+				id: user.id,
+				email: user.email,
+				fullName: user.fullName,
+				role: user.role,
+			},
+			organizationsCount: organizations.length,
+			allConsistent,
+			totalDiscrepancy,
+			organizations: reconciliations,
+		};
+	}
+
+	async applyUserBalanceReconciliation(
+		userId: string,
+		user: SalesUser,
+		payload: { note: string; organizationId?: string; overrideAmount?: number },
+	) {
+		const targetUser = await this.usersRepository.findOne({ where: { id: userId } });
+		if (!targetUser) {
+			throw new NotFoundException(`User with id "${userId}" was not found.`);
+		}
+
+		const ownedOrganizations = await this.organizationsRepository.find({
+			where: { ownerUserId: userId },
+		});
+		const memberships = await this.organizationMembersRepository.find({
+			where: { userId, status: 'active' },
+			relations: { organization: true },
+		});
+		const membershipOrganizations = memberships
+			.map((m) => m.organization)
+			.filter((org): org is OrganizationEntity => Boolean(org));
+
+		const orgMap = new Map<string, OrganizationEntity>();
+		for (const org of ownedOrganizations) orgMap.set(org.id, org);
+		for (const org of membershipOrganizations) if (!orgMap.has(org.id)) orgMap.set(org.id, org);
+
+		const organizations = Array.from(orgMap.values());
+
+		if (!organizations.length) {
+			throw new BadRequestException('User does not own or belong to any organizations to reconcile.');
+		}
+
+		if (payload.organizationId) {
+			const org = organizations.find((o) => o.id === payload.organizationId);
+			if (!org) {
+				throw new BadRequestException('The specified organization is not associated with this user.');
+			}
+			return this.ledgerService.applyOrganizationBalanceReconciliation(
+				org.id,
+				{ note: payload.note, overrideAmount: payload.overrideAmount },
+				user,
+			);
+		}
+
+		// Reconcile all organizations associated with this user that have inconsistencies
+		const results = [];
+		for (const org of organizations) {
+			const inspection = await this.ledgerService.inspectOrganizationBalanceReconciliation(org.id);
+			if (!inspection.isConsistent) {
+				const result = await this.ledgerService.applyOrganizationBalanceReconciliation(
+					org.id,
+					{ note: payload.note },
+					user,
+				);
+				results.push(result);
+			}
+		}
+
+		if (!results.length) {
+			throw new BadRequestException('All organizations associated with this user are already consistent.');
+		}
+
+		return {
+			success: true,
+			userId,
+			reconciledOrganizationsCount: results.length,
+			results,
+		};
+	}
+
 	async approveWithdrawalRequest(id: string, user: SalesUser, payload?: { note?: string }) {
 		const request = await this.findWithdrawalRequest(id);
 		if (!['pending_review', 'failed'].includes(request.status)) {
 			throw new BadRequestException('Only pending or failed withdrawal requests can be approved.');
+		}
+		if (request.metadata?.beneficiaryType !== 'influencer') {
+			const pricing = await this.platformSettingsService.getPricingSettings();
+			const entries = request.withdrawalType === 'normal'
+				? await this.ledgerService.getWithdrawableEntries(request.organization.id)
+				: (await this.ledgerService.getOrganizationEntries(request.organization.id)).filter((entry) => entry.type === 'organizer_net' && ['pending', 'available'].includes(entry.status));
+			const gross = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+			const currentReservation = ['pending_review', 'approved', 'processing'].includes(request.status) ? Number(request.amount || 0) : 0;
+			const reserved = Math.max(0, (await this.getReservedWithdrawalAmount(request.organization.id)) - currentReservation);
+			const riskReserve = this.calculateRiskReserve(gross, pricing.organizerReservePercent);
+			const eligible = this.roundMoney(Math.max(0, gross - reserved - riskReserve));
+			if (Number(request.amount || 0) > eligible) {
+				throw new BadRequestException(`This withdrawal is no longer fully covered. Current eligible balance is ${this.formatMoney(eligible, request.currency || 'USD')}.`);
+			}
 		}
 		request.status = 'approved';
 		request.reviewedByUserId = user.id;
@@ -856,6 +1037,7 @@ export class OrganizerSalesService {
 			headers: {
 				Authorization: `Bearer ${secretKey}`,
 				'Content-Type': 'application/x-www-form-urlencoded',
+				'Idempotency-Key': `organizer-withdrawal:${withdrawalRequestId || organizationId}:${Math.round(amount * 100)}`,
 			},
 			body: params,
 		});
