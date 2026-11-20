@@ -273,7 +273,7 @@ export class OrganizerSalesService {
 	async earlyWithdrawalPreview(organizationId: string, user: SalesUser, amount?: number) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		const pricing = await this.platformSettingsService.getPricingSettings();
-		const balance = await this.ledgerService.getBalance(organizationId);
+		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), pricing.organizerReservePercent);
 		const grossAvailable = this.roundMoney(Math.max(0, Number(balance.available || 0) + Number(balance.pending || 0) - reserved - reserve));
@@ -292,6 +292,20 @@ export class OrganizerSalesService {
 			feeSource: organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default',
 			earlyWithdrawalEnabled: pricing.earlyWithdrawalEnabled,
 		};
+	}
+
+	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'instant' = 'normal') {
+		await this.ensureOrganizationAccess(organizationId, user);
+		const balance = await this.getAdjustedBalance(organizationId);
+		const requested = this.roundMoney(Number(amount || 0));
+		const free = this.roundMoney(Number(balance.withdrawable || 0));
+		const early = this.roundMoney(Math.max(0, Number(balance.grossAvailable || 0) - Number(balance.reserved || 0) - free));
+		const earlyRelease = requested > free;
+		const pricing = await this.platformSettingsService.getPricingSettings();
+		const feePercent = earlyRelease ? (withdrawalType === 'instant' ? pricing.instantWithdrawalFeePercent : pricing.standardWithdrawalFeePercent) : 0;
+		const feeAmount = this.roundMoney(requested * feePercent);
+		const snapshot = `${organizationId}:${requested}:${free}:${Number(balance.reserved || 0)}:${withdrawalType}`;
+		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: balance.reserved, withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url') };
 	}
 
 	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
@@ -315,7 +329,7 @@ export class OrganizerSalesService {
 	async requestWithdrawal(
 		organizationId: string,
 		user: SalesUser,
-		payload?: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean },
+		payload?: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string },
 	) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		if (!organization.stripeAccountId) {
@@ -340,6 +354,10 @@ export class OrganizerSalesService {
 			throw new BadRequestException('No available balance to request yet.');
 		}
 		const amount = this.roundMoney(Number(payload?.amount || available));
+		if (payload?.previewToken) {
+			const fresh = await this.withdrawalPreview(organizationId, user, amount, withdrawalType === 'instant' ? 'instant' : 'normal');
+			if (fresh.previewToken !== payload.previewToken) throw new BadRequestException('Your balance or withdrawal terms changed. Please review and confirm again.');
+		}
 		if (!Number.isFinite(amount) || amount <= 0) {
 			throw new BadRequestException('Withdrawal amount must be greater than zero.');
 		}
@@ -780,7 +798,7 @@ export class OrganizerSalesService {
 	}
 
 	private async getAdjustedBalance(organizationId: string) {
-		const balance = await this.ledgerService.getBalance(organizationId);
+		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = Number(balance.available || 0);

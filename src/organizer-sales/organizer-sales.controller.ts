@@ -114,10 +114,15 @@ export class OrganizerSalesController {
 		return this.organizerSalesService.earlyWithdrawalPreview(organizationId, req.user, amount ? Number(amount) : undefined);
 	}
 
+	@Get('withdrawal-requests/preview')
+	withdrawalPreview(@Query('organizationId') organizationId: string, @Query('amount') amount: string, @Query('withdrawalType') withdrawalType: 'normal' | 'instant' | undefined, @Req() req: { user: { id: string; email?: string; role: Role } }) {
+		return this.organizerSalesService.withdrawalPreview(organizationId, req.user, Number(amount), withdrawalType === 'instant' ? 'instant' : 'normal');
+	}
+
 	@Post('withdrawal-requests')
 	requestWithdrawal(
 		@Query('organizationId') organizationId: string,
-		@Body() body: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean },
+		@Body() body: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string },
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
 		return this.organizerSalesService.requestWithdrawal(organizationId, req.user, body);

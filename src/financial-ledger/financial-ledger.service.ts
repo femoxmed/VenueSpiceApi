@@ -176,38 +176,29 @@ export class FinancialLedgerService {
 		});
 	}
 
-	async getBalance(organizationId: string) {
-		const entries = await this.getOrganizationEntries(organizationId);
-		const organizerEntries = entries.filter((entry) => entry.type === 'organizer_net');
-		const payoutEntries = entries.filter((entry) => entry.type === 'payout');
-		const pending = this.sum(
-			organizerEntries.filter((entry) => entry.status === 'pending'),
-		);
-		const available = this.sum(
-			organizerEntries.filter((entry) => entry.status === 'available'),
-		);
-		const legacyPaidOut = this.sum(
-			organizerEntries.filter((entry) => {
-				const metadata = entry.metadata ?? {};
-				return entry.status === 'paid_out' && metadata.paidOutAutomaticallyByStripe === true;
-			}),
-		);
-		const recordedPayouts = Math.abs(this.sum(
-			payoutEntries.filter((entry) => entry.status === 'paid_out'),
-		));
-		const paidOut = legacyPaidOut + recordedPayouts;
-		const reversed = Math.abs(this.sum(
-			entries.filter((entry) => entry.status === 'reversed' || entry.type === 'refund'),
-		));
-
+	async getBalance(organizationId: string, options: { synchronize?: boolean } = {}) {
+		if (options.synchronize !== false) await this.syncOrganizationOrders(organizationId);
+		await this.releaseAvailableEntries(organizationId);
+		const totals = await this.ledgerRepository.createQueryBuilder('entry')
+			.select("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'pending' THEN entry.amount ELSE 0 END), 0)", 'pending')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.status = 'reversed' OR entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
+			.where('entry.organizationId = :organizationId', { organizationId })
+			.getRawOne<{ pending: string; available: string; legacyPaidOut: string; recordedPayouts: string; reversed: string }>();
+		const currencyRow = await this.ledgerRepository.findOne({ where: { organization: { id: organizationId } }, select: ['currency'] });
+		const pending = Number(totals?.pending || 0);
+		const available = Number(totals?.available || 0);
+		const paidOut = Number(totals?.legacyPaidOut || 0) + Number(totals?.recordedPayouts || 0);
+		const reversed = Number(totals?.reversed || 0);
 		return {
-			currency: entries[0]?.currency || 'USD',
+			currency: currencyRow?.currency || 'USD',
 			pending: this.roundMoney(pending),
 			available: this.roundMoney(available),
 			paidOut: this.roundMoney(paidOut),
 			reversed: this.roundMoney(reversed),
 			totalEarned: this.roundMoney(pending + available + paidOut),
-			entries,
 		};
 	}
 
