@@ -714,9 +714,10 @@ export class OrganizerSalesService {
 			organization.id,
 			payoutAmount,
 			request.sourceEntryIds ?? undefined,
+			{ allowPending: request.withdrawalType !== 'normal' },
 		);
 		if (!entries.length) {
-			throw new BadRequestException('Available ledger balance is no longer enough to pay this request.');
+			throw new BadRequestException('Eligible ledger balance is no longer enough to pay this request.');
 		}
 
 		request.status = 'processing';

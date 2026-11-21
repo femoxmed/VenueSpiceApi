@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThanOrEqual, Repository } from 'typeorm';
+import { In, LessThanOrEqual, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
 import { EventEntity } from '../events/entities/event.entity';
@@ -222,22 +222,33 @@ export class FinancialLedgerService {
 		};
 	}
 
-	async getWithdrawableEntries(organizationId: string) {
+	async getWithdrawableEntries(
+		organizationId: string,
+		options?: { allowPending?: boolean },
+	) {
 		await this.syncOrganizationOrders(organizationId);
+		const allowedStatuses: FinancialLedgerEntryStatus[] = options?.allowPending
+			? ['available', 'pending']
+			: ['available'];
 		return this.ledgerRepository.find({
 			where: {
 				organization: { id: organizationId },
 				type: 'organizer_net',
-				status: 'available',
+				status: In(allowedStatuses),
 			},
 			order: { availableAt: 'ASC', createdAt: 'ASC' },
 		});
 	}
 
-	async prepareWithdrawableEntries(organizationId: string, requestedAmount: number, preferredEntryIds?: string[]) {
+	async prepareWithdrawableEntries(
+		organizationId: string,
+		requestedAmount: number,
+		preferredEntryIds?: string[],
+		options?: { allowPending?: boolean },
+	) {
 		const amount = this.roundMoney(requestedAmount);
 		if (amount <= 0) return [];
-		const entries = await this.getWithdrawableEntries(organizationId);
+		const entries = await this.getWithdrawableEntries(organizationId, options);
 		const preferred = new Set(preferredEntryIds ?? []);
 		const ordered = preferred.size
 			? [
