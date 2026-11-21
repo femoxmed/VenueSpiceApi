@@ -177,6 +177,18 @@ export class OrganizationEntity {
 	@Column({ name: 'early_withdrawal_approved_at', type: 'timestamptz', nullable: true })
 	earlyWithdrawalApprovedAt?: Date | null;
 
+	@Column({ name: 'reserve_exempt', type: 'boolean', default: false })
+	reserveExempt: boolean;
+
+	@Column({ name: 'reserve_exempt_reason', type: 'text', nullable: true })
+	reserveExemptReason?: string | null;
+
+	@Column({ name: 'reserve_exempt_approved_by', type: 'uuid', nullable: true })
+	reserveExemptApprovedBy?: string | null;
+
+	@Column({ name: 'reserve_exempt_approved_at', type: 'timestamptz', nullable: true })
+	reserveExemptApprovedAt?: Date | null;
+
 	@OneToMany(() => EventEntity, (event) => event.organization)
 	events: EventEntity[];
 

@@ -276,7 +276,8 @@ export class OrganizerSalesService {
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
-		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), pricing.organizerReservePercent);
+		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
+		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), effectiveReservePercent);
 		const grossAvailable = this.roundMoney(Math.max(0, Number(balance.available || 0) + Number(balance.pending || 0) - reserved - reserve));
 		const feePercent = organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null
 			? Number(organization.earlyWithdrawalFeePercent)
@@ -292,24 +293,26 @@ export class OrganizerSalesService {
 			netAmount: this.roundMoney(Math.max(0, requested - feeAmount)),
 			feeSource: organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default',
 			earlyWithdrawalEnabled: pricing.earlyWithdrawalEnabled,
+			reserveExempt: Boolean(organization.reserveExempt),
 		};
 	}
 
 	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'early' | 'instant' = 'normal') {
-		await this.ensureOrganizationAccess(organizationId, user);
+		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		const balance = withdrawalType === 'normal' ? await this.getAdjustedBalance(organizationId) : await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const requested = this.roundMoney(Number(amount || 0));
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = this.roundMoney(Number(balance.available || 0) + (withdrawalType === 'normal' ? 0 : Number(balance.pending || 0)));
-		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
+		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const free = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
 		const early = withdrawalType === 'normal' ? 0 : this.roundMoney(Math.max(0, free - this.roundMoney(Number((await this.getAdjustedBalance(organizationId)).withdrawable || 0))));
 		const earlyRelease = withdrawalType !== 'normal' || requested > free;
 		const feePercent = earlyRelease ? (withdrawalType === 'instant' ? pricing.instantWithdrawalFeePercent : pricing.standardWithdrawalFeePercent) : 0;
 		const feeAmount = this.roundMoney(requested * feePercent);
 		const snapshot = `${organizationId}:${requested}:${free}:${reserved}:${riskReserve}:${withdrawalType}`;
-		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: this.roundMoney(reserved + riskReserve), withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url') };
+		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: this.roundMoney(reserved + riskReserve), withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url'), reserveExempt: Boolean(organization.reserveExempt) };
 	}
 
 	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
@@ -361,7 +364,8 @@ export class OrganizerSalesService {
 			? this.roundMoney(Number(earlyBalance?.pending || 0) + Number(earlyBalance?.available || 0))
 			: this.roundMoney((ledgerEntries as any[]).reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
-		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
+		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const available = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
 		const currency = earlyBalance?.currency || (ledgerEntries as any[])[0]?.currency || 'USD';
 		if ((withdrawalType === 'normal' && !(ledgerEntries as any[]).length) || available <= 0) {
@@ -979,11 +983,13 @@ export class OrganizerSalesService {
 	}
 
 	private async getAdjustedBalance(organizationId: string) {
+		const organization = await this.organizationsRepository.findOne({ where: { id: organizationId } });
 		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = Number(balance.available || 0);
-		const riskReserve = this.calculateRiskReserve(grossAvailable, pricing.organizerReservePercent);
+		const effectiveReservePercent = organization?.reserveExempt ? 0 : pricing.organizerReservePercent;
+		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
 		return {
 			...balance,
@@ -991,7 +997,8 @@ export class OrganizerSalesService {
 			reserved: this.roundMoney(reserved + riskReserve),
 			withdrawalReserved: this.roundMoney(reserved),
 			riskReserve: this.roundMoney(riskReserve),
-			reservePercent: pricing.organizerReservePercent,
+			reservePercent: effectiveReservePercent,
+			reserveExempt: Boolean(organization?.reserveExempt),
 			withdrawable,
 			available: withdrawable,
 		};

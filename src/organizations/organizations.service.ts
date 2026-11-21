@@ -439,6 +439,26 @@ export class OrganizationsService {
 		return this.findOne(saved.id);
 	}
 
+	async updateReserveExemption(id: string, dto: { exempt: boolean; reason?: string }, user?: { id: string; email?: string }, request?: Request) {
+		const organization = await this.findOne(id);
+		const before = { exempt: organization.reserveExempt, reason: organization.reserveExemptReason };
+		organization.reserveExempt = Boolean(dto.exempt);
+		organization.reserveExemptReason = dto.reason?.trim() || null;
+		organization.reserveExemptApprovedBy = user?.id || null;
+		organization.reserveExemptApprovedAt = new Date();
+		const saved = await this.organizationsRepository.save(organization);
+		await this.auditService.log(
+			'organization.reserve_exemption.updated',
+			user,
+			'organization',
+			saved.id,
+			{ before, after: { exempt: saved.reserveExempt, reason: saved.reserveExemptReason } },
+			{},
+			request,
+		);
+		return this.findOne(saved.id);
+	}
+
 	async checkOrganizerUsernameAvailability(username: string, organizationId?: string) {
 		const normalized = this.normalizeOrganizerUsername(username);
 		const validationMessage = this.validateOrganizerUsername(normalized);
@@ -653,6 +673,10 @@ export class OrganizationsService {
 			earlyWithdrawalFeeReason: organization.earlyWithdrawalFeeReason,
 			earlyWithdrawalApprovedBy: organization.earlyWithdrawalApprovedBy,
 			earlyWithdrawalApprovedAt: organization.earlyWithdrawalApprovedAt,
+			reserveExempt: organization.reserveExempt,
+			reserveExemptReason: organization.reserveExemptReason,
+			reserveExemptApprovedBy: organization.reserveExemptApprovedBy,
+			reserveExemptApprovedAt: organization.reserveExemptApprovedAt,
 		};
 	}
 

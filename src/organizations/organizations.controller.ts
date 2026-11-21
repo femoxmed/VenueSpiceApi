@@ -90,6 +90,17 @@ export class OrganizationsController {
 	}
 
 	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN)
+	@Patch(':id/reserve-exemption')
+	updateReserveExemption(
+		@Param('id') id: string,
+		@Body() dto: import('./dto/update-organization-reserve-exemption.dto').UpdateOrganizationReserveExemptionDto,
+		@Req() req: { user: { id: string; email?: string } },
+	) {
+		return this.organizationsService.updateReserveExemption(id, dto, req.user, req as any);
+	}
+
+	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN, Role.ORG_ADMIN)
 	@Get(':id')
 	findOne(@Param('id') id: string) {
