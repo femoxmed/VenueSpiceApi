@@ -349,26 +349,19 @@ export class OrganizerSalesService {
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		if (withdrawalType !== 'normal' && !pricing.earlyWithdrawalEnabled) throw new BadRequestException('Early and instant withdrawals are currently disabled.');
 		if (withdrawalType !== 'normal' && payload?.acceptedEarlyWithdrawalFee !== true) throw new BadRequestException('Please accept the withdrawal fee before continuing.');
-		// Early/instant requests only need the aggregate pending+available balance;
-		// avoid materializing the entire ledger in the API process. Payment-time
-		// reservation re-reads the concrete entries transactionally.
-		const entries = withdrawalType !== 'normal'
-			? (() => {
-				const balance = this.ledgerService.getBalance(organizationId, { synchronize: false });
-				return balance;
-			})()
-			: this.ledgerService.getWithdrawableEntries(organizationId);
-		const earlyBalance: any = withdrawalType !== 'normal' ? await entries : null;
-		const ledgerEntries = withdrawalType !== 'normal' ? [] : entries;
+		const adjustedBalance = await this.getAdjustedBalance(organizationId);
+		const balance = withdrawalType !== 'normal'
+			? await this.ledgerService.getBalance(organizationId, { synchronize: false })
+			: adjustedBalance;
 		const grossAvailable = withdrawalType !== 'normal'
-			? this.roundMoney(Number(earlyBalance?.pending || 0) + Number(earlyBalance?.available || 0))
-			: this.roundMoney((ledgerEntries as any[]).reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+			? this.roundMoney(Number(balance?.pending || 0) + Number(balance?.available || 0))
+			: this.roundMoney(Number(adjustedBalance?.grossAvailable || adjustedBalance?.available || 0));
 		const reserved = await this.getReservedWithdrawalAmount(organizationId);
 		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
 		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const available = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
-		const currency = earlyBalance?.currency || (ledgerEntries as any[])[0]?.currency || 'USD';
-		if ((withdrawalType === 'normal' && !(ledgerEntries as any[]).length) || available <= 0) {
+		const currency = balance?.currency || 'USD';
+		if (available <= 0) {
 			throw new BadRequestException('No available balance to request yet.');
 		}
 		const amount = this.roundMoney(Number(payload?.amount || available));
@@ -409,16 +402,12 @@ export class OrganizerSalesService {
 				requestedByUserId: user.id,
 				requestedByEmail: user.email,
 				requesterNote: payload?.note?.trim() || null,
-				// Early/instant requests may span a very large pending ledger. Those IDs are
-				// not needed when the admin later pays the request (payment re-selects
-				// withdrawable entries), so do not serialize an unbounded array into JSON.
-				sourceEntryIds: withdrawalType === 'normal' ? (ledgerEntries as any[]).map((entry) => entry.id) : [],
+				sourceEntryIds: [],
 				metadata: {
 					requestedAvailableBalance: available,
 					grossAvailableBalance: grossAvailable,
 					reservedBalance: reserved,
 					riskReserve,
-					sourceEntryCount: (ledgerEntries as any[]).length,
 				},
 			}),
 		);
@@ -630,13 +619,14 @@ export class OrganizerSalesService {
 		}
 		if (request.metadata?.beneficiaryType !== 'influencer') {
 			const pricing = await this.platformSettingsService.getPricingSettings();
-			const entries = request.withdrawalType === 'normal'
-				? await this.ledgerService.getWithdrawableEntries(request.organization.id)
-				: (await this.ledgerService.getOrganizationEntries(request.organization.id)).filter((entry) => entry.type === 'organizer_net' && ['pending', 'available'].includes(entry.status));
-			const gross = this.roundMoney(entries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0));
+			const balance = await this.ledgerService.getBalance(request.organization.id, { synchronize: false });
+			const gross = request.withdrawalType === 'normal'
+				? Number(balance.available || 0)
+				: Number(balance.available || 0) + Number(balance.pending || 0);
 			const currentReservation = ['pending_review', 'approved', 'processing'].includes(request.status) ? Number(request.amount || 0) : 0;
 			const reserved = Math.max(0, (await this.getReservedWithdrawalAmount(request.organization.id)) - currentReservation);
-			const riskReserve = this.calculateRiskReserve(gross, pricing.organizerReservePercent);
+			const effectiveReservePercent = request.organization?.reserveExempt ? 0 : pricing.organizerReservePercent;
+			const riskReserve = this.calculateRiskReserve(gross, effectiveReservePercent);
 			const eligible = this.roundMoney(Math.max(0, gross - reserved - riskReserve));
 			if (Number(request.amount || 0) > eligible) {
 				throw new BadRequestException(`This withdrawal is no longer fully covered. Current eligible balance is ${this.formatMoney(eligible, request.currency || 'USD')}.`);

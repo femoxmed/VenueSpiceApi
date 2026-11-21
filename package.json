@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "build": "nest build",
-    "start": "npm run seed:vendor-categories && npm run seed:blogs && node dist/main",
+    "start": "npm run seed:vendor-categories && npm run seed:blogs && node --max-old-space-size=1536 dist/main",
     "dev": "nest start --watch",
     "seed": "ts-node src/simple-seed.ts",
     "seed:blogs": "node dist/seed-blogs.js",
