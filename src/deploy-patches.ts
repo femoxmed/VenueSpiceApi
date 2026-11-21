@@ -95,8 +95,7 @@ async function runDeployPatches() {
 			// Invalidate the refunded ticket
 			await queryRunner.query(`
 				UPDATE issued_tickets
-				SET status = 'refunded',
-				    updated_at = NOW()
+				SET status = 'refunded'
 				WHERE id = '539307bb-7e52-4faa-9304-72defb56f3b9'
 				  AND status = 'valid';
 			`);
