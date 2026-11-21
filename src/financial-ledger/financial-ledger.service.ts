@@ -96,6 +96,17 @@ export class FinancialLedgerService {
 
 		for (const entry of entries) {
 			if (Math.abs(entry.amount) <= 0) continue;
+			// If this is organizer_net for an order that has partial refunds deducted, protect the adjusted amount
+			if (entry.type === 'organizer_net') {
+				const existing = await this.ledgerRepository.findOne({
+					where: { idempotencyKey: `ticket-order:${order.id}:organizer_net` },
+				});
+				if (existing && Number(existing.amount) < entry.amount) {
+					// Entry was previously deducted (e.g. partial refund), keep the lower amount
+					await this.upsertOrderEntry(order, entry.type, Number(existing.amount), entry.status, entry.availableAt ?? availableAt, entry.metadata);
+					continue;
+				}
+			}
 			await this.upsertOrderEntry(order, entry.type, entry.amount, entry.status, entry.availableAt ?? availableAt, entry.metadata);
 		}
 

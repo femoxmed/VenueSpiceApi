@@ -71,25 +71,18 @@ async function runDeployPatches() {
 		`);
 
 		// 2. Adjust Liberty Cromwell pending organizer_net entry to remaining subtotal ($10.49)
-		// First check current amount
-		const netEntries = await queryRunner.query(`
-			SELECT id, amount FROM financial_ledger_entries
-			WHERE "orderId" = '6ead14df-dd08-44d4-9167-d5bfa38cdbca'
-			  AND type = 'organizer_net'
+		console.log('[deploy-patch] Checking and adjusting Liberty Cromwell organizer_net entry...');
+		const updateResult = await queryRunner.query(`
+			UPDATE financial_ledger_entries
+			SET amount = 10.49,
+			    updated_at = NOW()
+			WHERE (
+				idempotency_key = 'ticket-order:6ead14df-dd08-44d4-9167-d5bfa38cdbca:organizer_net'
+				OR ("orderId" = '6ead14df-dd08-44d4-9167-d5bfa38cdbca' AND type = 'organizer_net')
+			)
+			AND amount > 10.49;
 		`);
-
-		if (netEntries && netEntries.length > 0) {
-			const currentAmt = Number(netEntries[0].amount);
-			if (currentAmt > 10.49) {
-				console.log(`[deploy-patch] Updating Liberty Cromwell organizer_net entry from ${currentAmt} to 10.49`);
-				await queryRunner.query(`
-					UPDATE financial_ledger_entries
-					SET amount = 10.49,
-					    updated_at = NOW()
-					WHERE id = $1
-				`, [netEntries[0].id]);
-			}
-		}
+		console.log('[deploy-patch] Updated organizer_net entries count:', updateResult);
 
 		// 3. Invalidate refunded ticket
 		await queryRunner.query(`
