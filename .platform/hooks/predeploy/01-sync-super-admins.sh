@@ -58,6 +58,10 @@ else
   echo "[predeploy] Blog seed finished"
 fi
 
+echo "[predeploy] Running deploy patches"
+npm run deploy:patch
+echo "[predeploy] Deploy patches finished"
+
 if [ "${SYNC_SUPER_ADMINS_ON_DEPLOY:-true}" = "false" ]; then
   echo "[predeploy] Skipping super admin sync because SYNC_SUPER_ADMINS_ON_DEPLOY=false"
   exit 0
