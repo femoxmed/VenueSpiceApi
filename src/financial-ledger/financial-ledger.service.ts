@@ -193,7 +193,7 @@ export class FinancialLedgerService {
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
-			.addSelect("COALESCE(SUM(CASE WHEN entry.status = 'reversed' OR entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
+			.addSelect("COALESCE(SUM(CASE WHEN (entry.type = 'refund' OR (entry.status = 'reversed' AND entry.type = 'organizer_net')) THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
 			.addSelect('MIN(entry.currency)', 'currency')
 			.where('entry.organizationId = :organizationId', { organizationId })
 			.getRawOne<{ pending: string; available: string; legacyPaidOut: string; recordedPayouts: string; reversed: string }>();
@@ -716,7 +716,7 @@ export class FinancialLedgerService {
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status IN ('pending', 'processing') THEN ABS(entry.amount) ELSE 0 END), 0)", 'pendingPayouts')
-			.addSelect("COALESCE(SUM(CASE WHEN entry.status = 'reversed' OR entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
+			.addSelect("COALESCE(SUM(CASE WHEN (entry.type = 'refund' OR (entry.status = 'reversed' AND entry.type = 'organizer_net')) THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
 			.addSelect("COALESCE(SUM(CASE WHEN (entry.metadata->>'isReconciliationAdjustment') = 'true' THEN entry.amount ELSE 0 END), 0)", 'previousAdjustments')
 			.where('entry.organizationId = :organizationId', { organizationId })
 			.getRawOne<{
