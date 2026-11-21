@@ -13,6 +13,8 @@ import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity'
 import { NotificationsService } from '../notifications/notifications.service';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { FinancialLedgerEntryEntity } from '../financial-ledger/entities/financial-ledger-entry.entity';
+import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
 import { refundBreakdown, adminRefundBreakdown, RefundAmounts, RefundReason } from './refund-policy';
 import { AdminRefundDto } from './dto/admin-refund.dto';
 import { CreateRefundRequestDto } from './dto/create-refund-request.dto';
@@ -48,6 +50,7 @@ export class RefundsService {
 		private readonly invoicesRepository: Repository<InvoiceEntity>,
 		@InjectRepository(PaymentIntentEntity)
 		private readonly paymentIntentsRepository: Repository<PaymentIntentEntity>,
+		private readonly financialLedgerService: FinancialLedgerService,
 		private readonly configService: ConfigService,
 		private readonly auditService: AuditService,
 		private readonly notificationsService: NotificationsService,
@@ -633,11 +636,105 @@ export class RefundsService {
 				await this.markOrderRefunded(order, manager);
 			}
 
-			// Invalidate tickets if full refund
-			if (isFullRefund && Array.isArray(order.tickets)) {
-				for (const ticket of order.tickets) {
-					ticket.status = 'refunded';
-					await manager.save(IssuedTicketEntity, ticket);
+			// Invalidate tickets if full refund or if ticket count matches
+			if (Array.isArray(order.tickets)) {
+				if (isFullRefund) {
+					for (const ticket of order.tickets) {
+						ticket.status = 'refunded';
+						await manager.save(IssuedTicketEntity, ticket);
+					}
+				} else {
+					// Invalidate up to the proportion of refunded tickets
+					const validTickets = order.tickets.filter((t) => t.status === 'valid');
+					const ticketPrice = Number(order.items?.[0]?.unitPrice || 0);
+					if (ticketPrice > 0 && validTickets.length > 0) {
+						const ticketsToRefund = Math.min(validTickets.length, Math.floor((refundAmount + 0.01) / ticketPrice));
+						for (let i = 0; i < ticketsToRefund; i++) {
+							validTickets[i].status = 'refunded';
+							await manager.save(IssuedTicketEntity, validTickets[i]);
+						}
+					}
+				}
+			}
+
+			// Synchronize financial ledger entry
+			if (order.organization) {
+				const ledgerRepo = manager.getRepository(FinancialLedgerEntryEntity);
+				if (isFullRefund) {
+					// Mark existing organizer_net as reversed
+					await ledgerRepo
+						.createQueryBuilder()
+						.update(FinancialLedgerEntryEntity)
+						.set({ status: 'reversed' })
+						.where('"orderId" = :orderId', { orderId: order.id })
+						.andWhere('type = :type', { type: 'organizer_net' })
+						.execute();
+
+					// Insert/update refund ledger debit entry
+					const refundLedgerKey = `ticket-order:${order.id}:refund`;
+					const existingRefundEntry = await ledgerRepo.findOne({ where: { idempotencyKey: refundLedgerKey } });
+					const refundPayload = {
+						idempotencyKey: refundLedgerKey,
+						organization: order.organization,
+						event: order.event,
+						order,
+						type: 'refund' as const,
+						amount: -Number(order.organizerNet || 0),
+						status: 'reversed' as const,
+						currency: order.currency || 'USD',
+						availableAt: new Date(),
+						metadata: {
+							refundRequestId: savedRefund.id,
+							isFullRefund: true,
+							reconciliationMethod: savedRefund.reconciliationMethod,
+						},
+					};
+					if (existingRefundEntry) {
+						Object.assign(existingRefundEntry, refundPayload);
+						await ledgerRepo.save(existingRefundEntry);
+					} else {
+						await ledgerRepo.save(ledgerRepo.create(refundPayload));
+					}
+				} else if (organizerNetDeduction > 0) {
+					// Partial refund: insert a specific refund debit entry for this refund request
+					const refundLedgerKey = `manual-refund-ledger:${savedRefund.id}`;
+					const existingPartialEntry = await ledgerRepo.findOne({ where: { idempotencyKey: refundLedgerKey } });
+					const partialPayload = {
+						idempotencyKey: refundLedgerKey,
+						organization: order.organization,
+						event: order.event,
+						order,
+						type: 'refund' as const,
+						amount: -organizerNetDeduction,
+						status: 'reversed' as const,
+						currency: order.currency || 'USD',
+						availableAt: new Date(),
+						metadata: {
+							refundRequestId: savedRefund.id,
+							isPartialRefund: true,
+							refundAmount,
+							organizerNetDeduction,
+							reconciliationMethod: savedRefund.reconciliationMethod,
+						},
+					};
+					if (existingPartialEntry) {
+						Object.assign(existingPartialEntry, partialPayload);
+						await ledgerRepo.save(existingPartialEntry);
+					} else {
+						await ledgerRepo.save(ledgerRepo.create(partialPayload));
+					}
+
+					// Deduct from the existing pending/available organizer_net entry
+					const existingNetEntry = await ledgerRepo.findOne({
+						where: {
+							order: { id: order.id },
+							type: 'organizer_net',
+						},
+					});
+					if (existingNetEntry && Number(existingNetEntry.amount) > 0) {
+						existingNetEntry.amount = Math.max(0, Math.round((Number(existingNetEntry.amount) - organizerNetDeduction) * 100) / 100);
+						await ledgerRepo.save(existingNetEntry);
+					}
 				}
 			}
 

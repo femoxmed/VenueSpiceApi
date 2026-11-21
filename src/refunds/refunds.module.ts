@@ -2,12 +2,14 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuditModule } from '../audit/audit.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { FinancialLedgerModule } from '../financial-ledger/financial-ledger.module';
 import { UserEntity } from '../auth/entities/user.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { InvoiceEntity } from '../invoices/entities/invoice.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { IssuedTicketEntity } from '../ticket-orders/entities/issued-ticket.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
+import { FinancialLedgerEntryEntity } from '../financial-ledger/entities/financial-ledger-entry.entity';
 import { RefundEmailEntity } from './entities/refund-email.entity';
 import { RefundRequestEntity } from './entities/refund-request.entity';
 import { RefundsController } from './refunds.controller';
@@ -25,9 +27,11 @@ import { RefundsService } from './refunds.service';
 			UserEntity,
 			InvoiceEntity,
 			PaymentIntentEntity,
+			FinancialLedgerEntryEntity,
 		]),
 		AuditModule,
 		NotificationsModule,
+		FinancialLedgerModule,
 	],
 	controllers: [RefundsController],
 	providers: [RefundsService, RefundReconciliationService],

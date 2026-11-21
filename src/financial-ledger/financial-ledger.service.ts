@@ -642,24 +642,56 @@ export class FinancialLedgerService {
 		// Account for partial and item refunds on paid orders
 		let partialRefundsCount = 0;
 		let partialRefundsDeduction = 0;
+		const refundBreakdownList: Array<{
+			id: string;
+			orderId: string;
+			customerEmail?: string;
+			customerName?: string;
+			refundAmount: number;
+			organizerNetDeduction: number;
+			status: string;
+			reconciliationMethod?: string;
+			orderStatus: string;
+			isFullOrderRefund: boolean;
+			completedAt?: Date | null;
+		}> = [];
+
 		if (orderIds.length > 0) {
 			const successfulRefunds = await this.refundsRepository.createQueryBuilder('refund')
 				.where('refund.orderId IN (:...orderIds)', { orderIds })
 				.andWhere("refund.status IN ('succeeded', 'manually_reconciled')")
+				.orderBy('refund.createdAt', 'ASC')
 				.getMany();
 
 			for (const refund of successfulRefunds) {
 				const matchingOrder = paidOrders.find((o) => o.id === refund.orderId);
-				// If order is already status='refunded', its full net was already excluded from ordersOrganizerNetTotal
-				if (matchingOrder && matchingOrder.status === 'paid') {
+				if (!matchingOrder) continue;
+
+				const snapshot = refund.policySnapshot as any;
+				const deductedNet = snapshot?.refundedSubtotal != null
+					? Number(snapshot.refundedSubtotal)
+					: Number(refund.amount || 0);
+
+				const isFullOrderRefund = matchingOrder.status === 'refunded';
+
+				if (matchingOrder.status === 'paid') {
 					partialRefundsCount++;
-					// The organizer net deduction for this refund
-					const snapshot = refund.policySnapshot as any;
-					const deductedNet = snapshot?.refundedSubtotal != null
-						? Number(snapshot.refundedSubtotal)
-						: Number(refund.amount || 0);
 					partialRefundsDeduction += deductedNet;
 				}
+
+				refundBreakdownList.push({
+					id: refund.id,
+					orderId: refund.orderId,
+					customerEmail: refund.customerEmail,
+					customerName: matchingOrder.customerName,
+					refundAmount: Number(refund.amount || 0),
+					organizerNetDeduction: deductedNet,
+					status: refund.status,
+					reconciliationMethod: refund.reconciliationMethod || 'stripe',
+					orderStatus: matchingOrder.status,
+					isFullOrderRefund,
+					completedAt: refund.completedAt || refund.createdAt,
+				});
 			}
 		}
 
@@ -755,6 +787,7 @@ export class FinancialLedgerService {
 				taxes: ordersTax,
 				netEarnings: expectedNetEarnings,
 				refundedNet: ordersRefundedTotal,
+				refundBreakdown: refundBreakdownList,
 			},
 			ledgerSummary: {
 				available: ledgerAvailable,
