@@ -539,6 +539,129 @@ export class RefundsService {
 		}
 	}
 
+	async recordExternalRefund(dto: import('./dto/record-external-refund.dto').RecordExternalRefundDto, actor: { id: string; role: Role; email?: string }) {
+		this.assertPlatformAdmin(actor);
+		const orderId = dto.orderId;
+		const refundAmount = Number(dto.amount);
+		if (!Number.isFinite(refundAmount) || refundAmount <= 0) {
+			throw new BadRequestException('Refund amount must be a positive number');
+		}
+
+		const order = await this.ticketOrdersRepository.findOne({
+			where: { id: orderId },
+			relations: { organization: true, event: true, tickets: true, items: { ticketType: true } },
+		});
+		if (!order) {
+			throw new NotFoundException(`Order with id "${orderId}" was not found.`);
+		}
+
+		if (!['paid', 'refunded'].includes(order.status)) {
+			throw new BadRequestException(`Cannot refund order with status "${order.status}". Only paid orders can be refunded.`);
+		}
+
+		const orderTotal = Number(order.total || 0);
+		const existingRefunds = await this.refundsRepository.find({
+			where: { orderId },
+		});
+		const alreadyRefunded = existingRefunds
+			.filter((r) => ['succeeded', 'manually_reconciled'].includes(r.status))
+			.reduce((sum, r) => sum + Number(r.amount || 0), 0);
+
+		const remainingRefundable = Math.max(0, orderTotal - alreadyRefunded);
+		if (refundAmount > remainingRefundable + 0.01) {
+			throw new BadRequestException(
+				`Refund amount (${refundAmount.toFixed(2)}) exceeds remaining refundable balance on order (${remainingRefundable.toFixed(2)}).`,
+			);
+		}
+
+		const isFullRefund = dto.refundType === 'full' || Math.abs(refundAmount - orderTotal) < 0.01 || Math.abs(refundAmount - remainingRefundable) < 0.01;
+
+		// Calculate organizer net deduction
+		// If fee payer is buyer, organizerNet = subtotal (or ticket price).
+		// Deduct proportional subtotal/net from organizer.
+		const ratio = orderTotal > 0 ? Math.min(1, refundAmount / orderTotal) : 0;
+		const organizerNetDeduction = isFullRefund
+			? Number(order.organizerNet || 0)
+			: Math.round(Number(order.organizerNet || 0) * ratio * 100) / 100;
+
+		const policySnapshot = {
+			refundAmount,
+			refundedSubtotal: organizerNetDeduction,
+			refundedFees: Math.max(0, refundAmount - organizerNetDeduction),
+			taxPortion: 0,
+			isExternalReconciliation: true,
+			refundType: dto.refundType,
+			method: dto.method || 'stripe',
+			externalReference: dto.externalReference || dto.stripeRefundId || null,
+			evidenceUrl: dto.evidenceUrl || null,
+		};
+
+		const saved = await this.refundsRepository.manager.transaction(async (manager) => {
+			const refund = manager.create(RefundRequestEntity, {
+				order,
+				orderId: order.id,
+				customerEmail: order.customerEmail,
+				reason: dto.reason.trim(),
+				reviewNote: dto.reason.trim(),
+				reviewedById: actor.id,
+				reviewedAt: new Date(),
+				completedAt: new Date(),
+				status: 'manually_reconciled',
+				reconciliationMethod: (dto.stripeRefundId || dto.method?.toLowerCase() === 'stripe') ? 'stripe' : 'external',
+				stripeRefundId: dto.stripeRefundId || null,
+				amount: refundAmount,
+				currency: order.currency || 'USD',
+				policySnapshot: policySnapshot as any,
+				providerPayload: {
+					externalRefund: {
+						amount: refundAmount,
+						method: dto.method || 'stripe',
+						reference: dto.externalReference || dto.stripeRefundId || null,
+						stripeRefundId: dto.stripeRefundId || null,
+						evidenceUrl: dto.evidenceUrl || null,
+						note: dto.reason.trim(),
+						reconciledByUserId: actor.id,
+						reconciledByUserEmail: actor.email,
+						reconciledAt: new Date().toISOString(),
+					},
+				},
+			});
+
+			const savedRefund = await manager.save(RefundRequestEntity, refund);
+
+			if (isFullRefund) {
+				await this.markOrderRefunded(order, manager);
+			}
+
+			// Invalidate tickets if full refund
+			if (isFullRefund && Array.isArray(order.tickets)) {
+				for (const ticket of order.tickets) {
+					ticket.status = 'refunded';
+					await manager.save(IssuedTicketEntity, ticket);
+				}
+			}
+
+			return savedRefund;
+		});
+
+		await this.auditService.log(
+			'refund.manual_reconciled_external',
+			actor,
+			'refund_request',
+			saved.id,
+			{ status: saved.status, amount: saved.amount },
+			{
+				orderId: order.id,
+				organizationId: order.organization?.id,
+				stripeRefundId: dto.stripeRefundId,
+				refundType: dto.refundType,
+				evidenceUrl: dto.evidenceUrl,
+			},
+		);
+
+		return saved;
+	}
+
 	private isAdminRole(role: Role) {
 		return [Role.SUPER_ADMIN, Role.PLATFORM_ADMIN, Role.ADMIN].includes(role);
 	}
