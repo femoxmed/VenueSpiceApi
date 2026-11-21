@@ -580,19 +580,25 @@ export class FinancialLedgerService {
 
 		const paidOrders = await this.ticketOrdersRepository.find({
 			where: { organization: { id: organizationId } },
-			relations: { event: true },
+			relations: { event: true, items: true },
 			order: { paidAt: 'ASC', createdAt: 'ASC' },
 		});
 
 		let ordersGross = 0;
+		let ordersBuyerPaid = 0;
 		let ordersPlatformFee = 0;
 		let ordersProcessingFee = 0;
+		let ordersOrganizerPlatformFee = 0;
+		let ordersOrganizerProcessingFee = 0;
+		let ordersBuyerPlatformFee = 0;
+		let ordersBuyerProcessingFee = 0;
 		let ordersInfluencerCommission = 0;
 		let ordersTax = 0;
 		let ordersOrganizerNetTotal = 0;
 		let ordersRefundedTotal = 0;
 		let completedPaidOrdersCount = 0;
 		let refundedOrdersCount = 0;
+		let totalTicketsSold = 0;
 
 		const orderIds: string[] = [];
 
@@ -601,11 +607,32 @@ export class FinancialLedgerService {
 			if (order.status === 'paid') {
 				completedPaidOrdersCount++;
 				ordersGross += Number(order.subtotal || 0);
-				ordersPlatformFee += Number(order.platformFee || 0);
-				ordersProcessingFee += Number(order.processingFee || 0);
+				ordersBuyerPaid += Number(order.total || 0);
+
+				const opFee = Number(order.platformFee || 0);
+				const prFee = Number(order.processingFee || 0);
+				ordersPlatformFee += opFee;
+				ordersProcessingFee += prFee;
+
+				const bPlatform = this.feeSnapshotNumber(order, 'buyerPlatformFee', order.feePayer === 'buyer' ? opFee : 0);
+				const bProc = this.feeSnapshotNumber(order, 'buyerProcessingFee', order.feePayer === 'buyer' ? prFee : 0);
+				const oPlatform = this.feeSnapshotNumber(order, 'organizerPlatformFee', order.feePayer === 'organizer' ? opFee : Math.max(0, opFee - bPlatform));
+				const oProc = this.feeSnapshotNumber(order, 'organizerProcessingFee', order.feePayer === 'organizer' ? prFee : Math.max(0, prFee - bProc));
+
+				ordersBuyerPlatformFee += bPlatform;
+				ordersBuyerProcessingFee += bProc;
+				ordersOrganizerPlatformFee += oPlatform;
+				ordersOrganizerProcessingFee += oProc;
+
 				ordersInfluencerCommission += this.feeSnapshotNumber(order, 'influencerCommission', 0);
 				ordersTax += Number(order.tax || 0);
 				ordersOrganizerNetTotal += Number(order.organizerNet || 0);
+
+				if (Array.isArray(order.items)) {
+					for (const item of order.items) {
+						totalTicketsSold += Number(item.quantity || 0);
+					}
+				}
 			} else if (order.status === 'refunded') {
 				refundedOrdersCount++;
 				ordersRefundedTotal += Number(order.organizerNet || 0);
@@ -637,8 +664,13 @@ export class FinancialLedgerService {
 		}
 
 		ordersGross = this.roundMoney(ordersGross);
+		ordersBuyerPaid = this.roundMoney(ordersBuyerPaid);
 		ordersPlatformFee = this.roundMoney(ordersPlatformFee);
 		ordersProcessingFee = this.roundMoney(ordersProcessingFee);
+		ordersOrganizerPlatformFee = this.roundMoney(ordersOrganizerPlatformFee);
+		ordersOrganizerProcessingFee = this.roundMoney(ordersOrganizerProcessingFee);
+		ordersBuyerPlatformFee = this.roundMoney(ordersBuyerPlatformFee);
+		ordersBuyerProcessingFee = this.roundMoney(ordersBuyerProcessingFee);
 		ordersInfluencerCommission = this.roundMoney(ordersInfluencerCommission);
 		ordersTax = this.roundMoney(ordersTax);
 		ordersOrganizerNetTotal = this.roundMoney(ordersOrganizerNetTotal - partialRefundsDeduction);
@@ -707,12 +739,18 @@ export class FinancialLedgerService {
 			},
 			orderHistorySummary: {
 				completedPaidOrdersCount,
+				ticketsSold: totalTicketsSold,
 				refundedOrdersCount,
 				partialRefundsCount,
 				partialRefundsDeduction: this.roundMoney(partialRefundsDeduction),
 				grossSales: ordersGross,
+				buyerPaid: ordersBuyerPaid,
 				platformFees: ordersPlatformFee,
 				processingFees: ordersProcessingFee,
+				organizerPlatformFees: ordersOrganizerPlatformFee,
+				organizerProcessingFees: ordersOrganizerProcessingFee,
+				buyerPlatformFees: ordersBuyerPlatformFee,
+				buyerProcessingFees: ordersBuyerProcessingFee,
 				influencerCommissions: ordersInfluencerCommission,
 				taxes: ordersTax,
 				netEarnings: expectedNetEarnings,
