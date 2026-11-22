@@ -1,4 +1,5 @@
 import { BadRequestException, HttpException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { isPhoneNumber } from 'class-validator';
 import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -63,5 +64,53 @@ export class BuyerAuthService {
   const scope=businessAccount ? undefined : 'buyer';
   const claims={sub:result.id,email:result.email,role:result.role,...(scope ? {scope} : {}),emailProofAt};
   return {accessToken:this.jwt.sign(claims),refreshToken:this.jwt.sign({...claims,type:'refresh'},{secret:this.config.get<string>('JWT_REFRESH_SECRET')||this.config.get<string>('JWT_SECRET','change-me'),expiresIn:'30d'}),user:{...await this.auth.validateUser(result.id),sessionScope:scope}};
+ }
+
+ /**
+  * Guest identity — no OTP required.
+  * Finds or creates a buyer account from name + email + phone, then issues a
+  * short-lived (2 h) buyer-scoped JWT. The account is fully usable for checkout
+  * and can be claimed later via find-my-ticket or sign-in.
+  */
+ async guestIdentity(name: string, email: string, phone: string) {
+  email = email.trim().toLowerCase();
+  name = name.trim();
+  if (name.length < 2) throw new BadRequestException('Enter your full name.');
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new BadRequestException('Enter a valid email address.');
+  if (!isPhoneNumber(phone)) throw new BadRequestException('Enter a valid phone number with its country code.');
+
+  const user = await this.db.transaction(async m => {
+   await m.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`email:${this.hash(email)}`]);
+   let existing = await m.getRepository(UserEntity).createQueryBuilder('u').where('LOWER(u.email) = :email', { email }).getOne();
+   if (existing && !existing.isActive) throw new UnauthorizedException('This account is not active.');
+   if (!existing) {
+    const now = new Date();
+    await m.createQueryBuilder().insert().into(UserEntity).values({
+     email,
+     fullName: name,
+     phone,
+     passwordHash: await bcrypt.hash(randomBytes(32).toString('hex'), 10),
+     role: Role.CUSTOMER,
+     accountType: 'customer',
+     isActive: true,
+     verifiedAt: now,
+     customerTermsAcceptedAt: now,
+    }).orIgnore().execute();
+    existing = await m.getRepository(UserEntity).createQueryBuilder('u').where('LOWER(u.email) = :email', { email }).getOne();
+   }
+   if (!existing || !existing.isActive) throw new UnauthorizedException('Unable to create guest account.');
+   // Update name/phone on every guest checkout so most recent details win.
+   if (existing.fullName !== name || existing.phone !== phone) {
+    await m.getRepository(UserEntity).update(existing.id, { fullName: name, phone });
+    existing.fullName = name;
+    existing.phone = phone;
+   }
+   return existing;
+  });
+
+  const scope = 'buyer';
+  const claims = { sub: user.id, email: user.email, role: user.role, scope };
+  const accessToken = this.jwt.sign(claims, { expiresIn: '2h' });
+  return { accessToken, user: { id: user.id, email: user.email, fullName: user.fullName, phone: user.phone, role: user.role } };
  }
 }
