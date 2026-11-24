@@ -5,6 +5,7 @@ import { Brackets, In, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { UserEntity } from '../auth/entities/user.entity';
 import { Role } from '../common/enums/role.enum';
+import { EventEntity } from '../events/entities/event.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -16,7 +17,7 @@ import { TicketOrderItemEntity } from '../ticket-orders/entities/ticket-order-it
 import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 
 type SalesUser = { id: string; email?: string; role: Role };
-type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string; status?: string };
+type PaginationQuery = { page?: string | number; pageSize?: string | number; search?: string; status?: string; eventId?: string };
 
 type SalesLine = {
 	id: string;
@@ -48,6 +49,8 @@ export class OrganizerSalesService {
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
 		@InjectRepository(TicketTypeEntity)
 		private readonly ticketTypesRepository: Repository<TicketTypeEntity>,
+		@InjectRepository(EventEntity)
+		private readonly eventsRepository: Repository<EventEntity>,
 		@InjectRepository(WithdrawalRequestEntity)
 		private readonly withdrawalRequestsRepository: Repository<WithdrawalRequestEntity>,
 		private readonly ledgerService: FinancialLedgerService,
@@ -57,14 +60,14 @@ export class OrganizerSalesService {
 		private readonly platformSettingsService: PlatformSettingsService,
 	) {}
 
-	async metrics(organizationId: string, user: SalesUser) {
+	async metrics(organizationId: string, user: SalesUser, eventId?: string) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		return this.salesMetrics(await this.getOrders(organizationId));
+		return this.salesMetrics(await this.getOrders(organizationId, eventId));
 	}
 
-	async itemBreakdown(organizationId: string, user: SalesUser) {
+	async itemBreakdown(organizationId: string, user: SalesUser, eventId?: string) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const orders = await this.getOrders(organizationId);
+		const orders = await this.getOrders(organizationId, eventId);
 		const lines = orders.filter((order) => order.status === 'paid').flatMap((order) => this.buildOrderLines(order));
 		return {
 			tickets: this.summarizeLines(lines.filter((line) => line.kind === 'ticket')),
@@ -72,13 +75,16 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async influencerBreakdown(organizationId: string, user: SalesUser) {
+	async influencerBreakdown(organizationId: string, user: SalesUser, eventId?: string) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const orders = await this.ticketOrdersRepository.createQueryBuilder('order')
+		const qb = this.ticketOrdersRepository.createQueryBuilder('order')
 			.leftJoinAndSelect('order.referralCode', 'referralCode')
 			.where('order.organizationId = :organizationId', { organizationId })
-			.andWhere('order.status = :status', { status: 'paid' })
-			.orderBy('order.paidAt', 'DESC', 'NULLS LAST').addOrderBy('order.createdAt', 'DESC').getMany();
+			.andWhere('order.status = :status', { status: 'paid' });
+		if (eventId) {
+			qb.andWhere('order.eventId = :eventId', { eventId });
+		}
+		const orders = await qb.orderBy('order.paidAt', 'DESC', 'NULLS LAST').addOrderBy('order.createdAt', 'DESC').getMany();
 		return this.summarizeInfluencers(orders);
 	}
 
@@ -113,9 +119,9 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async summary(organizationId: string, user: SalesUser) {
+	async summary(organizationId: string, user: SalesUser, eventId?: string) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		const [orders, balance] = await Promise.all([this.getOrders(organizationId), this.getAdjustedBalance(organizationId)]);
+		const [orders, balance] = await Promise.all([this.getOrders(organizationId, eventId), this.getAdjustedBalance(organizationId, eventId)]);
 		const paidOrders = orders.filter((order) => order.status === 'paid');
 		const pendingOrders = orders.filter((order) => order.status === 'pending');
 		const refundedOrders = orders.filter((order) => order.status === 'refunded');
@@ -128,6 +134,7 @@ export class OrganizerSalesService {
 				available: balance.available,
 				paidOut: balance.paidOut,
 				reversed: balance.reversed,
+				byEvent: balance.byEvent,
 			},
 			orders: paidOrders.slice(0, 8).map((order) => this.toOrderRow(order)),
 			byEvent: this.groupLinesBy(lines, (line, order) => ({
@@ -145,7 +152,7 @@ export class OrganizerSalesService {
 	async orders(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
 		if (!this.hasPaginationQuery(query)) {
-			const orders = this.filterOrdersByStatus(await this.getOrders(organizationId), query.status);
+			const orders = this.filterOrdersByStatus(await this.getOrders(organizationId, query.eventId), query.status);
 			return orders.map((order) => this.toOrderRow(order));
 		}
 		const pagination = this.parsePagination(query);
@@ -163,6 +170,9 @@ export class OrganizerSalesService {
 			.take(pagination.pageSize);
 		if (status) {
 			builder.andWhere('order.status = :status', { status });
+		}
+		if (query.eventId?.trim()) {
+			builder.andWhere('event.id = :eventId', { eventId: query.eventId.trim() });
 		}
 		if (query.search?.trim()) {
 			const search = `%${query.search.trim()}%`;
@@ -266,16 +276,16 @@ export class OrganizerSalesService {
 		};
 	}
 
-	async balance(organizationId: string, user: SalesUser) {
+	async balance(organizationId: string, user: SalesUser, eventId?: string) {
 		await this.ensureOrganizationAccess(organizationId, user);
-		return this.getAdjustedBalance(organizationId);
+		return this.getAdjustedBalance(organizationId, eventId);
 	}
 
-	async earlyWithdrawalPreview(organizationId: string, user: SalesUser, amount?: number) {
+	async earlyWithdrawalPreview(organizationId: string, user: SalesUser, amount?: number, eventId?: string) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		const pricing = await this.platformSettingsService.getPricingSettings();
-		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
-		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false, eventId });
+		const reserved = await this.getReservedWithdrawalAmount(organizationId, eventId);
 		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
 		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), effectiveReservePercent);
 		const grossAvailable = this.roundMoney(Math.max(0, Number(balance.available || 0) + Number(balance.pending || 0) - reserved - reserve));
@@ -294,38 +304,45 @@ export class OrganizerSalesService {
 			feeSource: organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default',
 			earlyWithdrawalEnabled: pricing.earlyWithdrawalEnabled,
 			reserveExempt: Boolean(organization.reserveExempt),
+			eventId: eventId || null,
 		};
 	}
 
-	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'early' | 'instant' = 'normal') {
+	async withdrawalPreview(organizationId: string, user: SalesUser, amount: number, withdrawalType: 'normal' | 'early' | 'instant' = 'normal', eventId?: string) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
-		const balance = withdrawalType === 'normal' ? await this.getAdjustedBalance(organizationId) : await this.ledgerService.getBalance(organizationId, { synchronize: false });
+		const balance = withdrawalType === 'normal' ? await this.getAdjustedBalance(organizationId, eventId) : await this.ledgerService.getBalance(organizationId, { synchronize: false, eventId });
 		const requested = this.roundMoney(Number(amount || 0));
-		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const reserved = await this.getReservedWithdrawalAmount(organizationId, eventId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = this.roundMoney(Number(balance.available || 0) + (withdrawalType === 'normal' ? 0 : Number(balance.pending || 0)));
 		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
 		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const free = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
-		const early = withdrawalType === 'normal' ? 0 : this.roundMoney(Math.max(0, free - this.roundMoney(Number((await this.getAdjustedBalance(organizationId)).withdrawable || 0))));
+		const early = withdrawalType === 'normal' ? 0 : this.roundMoney(Math.max(0, free - this.roundMoney(Number((await this.getAdjustedBalance(organizationId, eventId)).withdrawable || 0))));
 		const earlyRelease = withdrawalType !== 'normal' || requested > free;
 		const feePercent = earlyRelease ? (withdrawalType === 'instant' ? pricing.instantWithdrawalFeePercent : pricing.standardWithdrawalFeePercent) : 0;
 		const feeAmount = this.roundMoney(requested * feePercent);
-		const snapshot = `${organizationId}:${requested}:${free}:${reserved}:${riskReserve}:${withdrawalType}`;
-		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: this.roundMoney(reserved + riskReserve), withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url'), reserveExempt: Boolean(organization.reserveExempt) };
+		const snapshot = `${organizationId}:${requested}:${free}:${reserved}:${riskReserve}:${withdrawalType}:${eventId || 'all'}`;
+		return { amount: requested, currency: balance.currency, freeBalance: free, earlyReleaseBalance: early, heldReserve: this.roundMoney(reserved + riskReserve), withdrawalType, earlyRelease, feePercent, feeAmount, netAmount: this.roundMoney(requested - feeAmount), previewToken: Buffer.from(snapshot).toString('base64url'), reserveExempt: Boolean(organization.reserveExempt), eventId: eventId || null };
 	}
 
 	async listWithdrawalRequests(organizationId: string, user: SalesUser, query: PaginationQuery = {}) {
 		await this.ensureOrganizationAccess(organizationId, user);
+		const where: any = { organization: { id: organizationId } };
+		if (query.eventId?.trim()) {
+			where.event = { id: query.eventId.trim() };
+		}
 		if (!this.hasPaginationQuery(query)) {
 			return this.withdrawalRequestsRepository.find({
-				where: { organization: { id: organizationId } },
+				where,
+				relations: { event: true },
 				order: { createdAt: 'DESC' },
 			});
 		}
 		const pagination = this.parsePagination(query);
 		const [items, total] = await this.withdrawalRequestsRepository.findAndCount({
-			where: { organization: { id: organizationId } },
+			where,
+			relations: { event: true },
 			order: { createdAt: 'DESC' },
 			skip: (pagination.page - 1) * pagination.pageSize,
 			take: pagination.pageSize,
@@ -336,7 +353,7 @@ export class OrganizerSalesService {
 	async requestWithdrawal(
 		organizationId: string,
 		user: SalesUser,
-		payload?: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string },
+		payload?: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string; eventId?: string },
 	) {
 		const organization = await this.ensureOrganizationAccess(organizationId, user);
 		if (!organization.stripeAccountId) {
@@ -345,18 +362,27 @@ export class OrganizerSalesService {
 		if (!organization.stripePayoutsEnabled && !organization.stripeAccountId.startsWith('acct_mock_')) {
 			throw new BadRequestException('Finish Stripe payout setup before requesting a withdrawal.');
 		}
+		let event: EventEntity | null = null;
+		if (payload?.eventId?.trim()) {
+			event = await this.eventsRepository.findOne({
+				where: { id: payload.eventId.trim(), organization: { id: organizationId } },
+			});
+			if (!event) {
+				throw new BadRequestException('Selected event not found in your organization.');
+			}
+		}
 		const withdrawalType = payload?.withdrawalType === 'instant' ? 'instant' : payload?.withdrawalType === 'early' ? 'early' : 'normal';
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		if (withdrawalType !== 'normal' && !pricing.earlyWithdrawalEnabled) throw new BadRequestException('Early and instant withdrawals are currently disabled.');
 		if (withdrawalType !== 'normal' && payload?.acceptedEarlyWithdrawalFee !== true) throw new BadRequestException('Please accept the withdrawal fee before continuing.');
-		const adjustedBalance = await this.getAdjustedBalance(organizationId);
+		const adjustedBalance = await this.getAdjustedBalance(organizationId, payload?.eventId?.trim());
 		const balance = withdrawalType !== 'normal'
-			? await this.ledgerService.getBalance(organizationId, { synchronize: false })
+			? await this.ledgerService.getBalance(organizationId, { synchronize: false, eventId: payload?.eventId?.trim() })
 			: adjustedBalance;
 		const grossAvailable = withdrawalType !== 'normal'
 			? this.roundMoney(Number(balance?.pending || 0) + Number(balance?.available || 0))
 			: this.roundMoney(Number(adjustedBalance?.grossAvailable || adjustedBalance?.available || 0));
-		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const reserved = await this.getReservedWithdrawalAmount(organizationId, payload?.eventId?.trim());
 		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
 		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
 		const available = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
@@ -366,7 +392,7 @@ export class OrganizerSalesService {
 		}
 		const amount = this.roundMoney(Number(payload?.amount || available));
 		if (payload?.previewToken) {
-			const fresh = await this.withdrawalPreview(organizationId, user, amount, withdrawalType);
+			const fresh = await this.withdrawalPreview(organizationId, user, amount, withdrawalType, payload?.eventId?.trim());
 			if (fresh.previewToken !== payload.previewToken) throw new BadRequestException('Your balance or withdrawal terms changed. Please review and confirm again.');
 		}
 		if (!Number.isFinite(amount) || amount <= 0) {
@@ -389,6 +415,7 @@ export class OrganizerSalesService {
 		const request = await this.withdrawalRequestsRepository.save(
 			this.withdrawalRequestsRepository.create({
 				organization,
+				event: event || null,
 				status: 'pending_review',
 				amount,
 				withdrawalType,
@@ -404,6 +431,8 @@ export class OrganizerSalesService {
 				requesterNote: payload?.note?.trim() || null,
 				sourceEntryIds: [],
 				metadata: {
+					eventId: event?.id || null,
+					eventTitle: event?.title || null,
 					requestedAvailableBalance: available,
 					grossAvailableBalance: grossAvailable,
 					reservedBalance: reserved,
@@ -461,6 +490,7 @@ export class OrganizerSalesService {
 	async listAdminWithdrawalRequests(status?: string) {
 		return this.withdrawalRequestsRepository.find({
 			where: status ? { status: status as never } : {},
+			relations: { organization: true, event: true },
 			order: { createdAt: 'DESC' },
 		});
 	}
@@ -714,7 +744,7 @@ export class OrganizerSalesService {
 			organization.id,
 			payoutAmount,
 			request.sourceEntryIds ?? undefined,
-			{ allowPending: request.withdrawalType !== 'normal' },
+			{ allowPending: request.withdrawalType !== 'normal', eventId: request.event?.id },
 		);
 		if (!entries.length) {
 			throw new BadRequestException('Eligible ledger balance is no longer enough to pay this request.');
@@ -973,15 +1003,26 @@ export class OrganizerSalesService {
 		return request;
 	}
 
-	private async getAdjustedBalance(organizationId: string) {
+	private async getAdjustedBalance(organizationId: string, eventId?: string) {
 		const organization = await this.organizationsRepository.findOne({ where: { id: organizationId } });
-		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
-		const reserved = await this.getReservedWithdrawalAmount(organizationId);
+		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false, eventId });
+		const byEvent = eventId ? undefined : await this.ledgerService.getEventBalances(organizationId);
+		const reserved = await this.getReservedWithdrawalAmount(organizationId, eventId);
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const grossAvailable = Number(balance.available || 0);
 		const effectiveReservePercent = organization?.reserveExempt ? 0 : pricing.organizerReservePercent;
 		const riskReserve = this.calculateRiskReserve(grossAvailable, effectiveReservePercent);
-		const withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
+		let withdrawable = this.roundMoney(Math.max(0, grossAvailable - reserved - riskReserve));
+
+		if (eventId) {
+			const orgBalance = await this.ledgerService.getBalance(organizationId, { synchronize: false });
+			const orgReserved = await this.getReservedWithdrawalAmount(organizationId);
+			const orgGross = Number(orgBalance.available || 0);
+			const orgRiskReserve = this.calculateRiskReserve(orgGross, effectiveReservePercent);
+			const orgWithdrawable = this.roundMoney(Math.max(0, orgGross - orgReserved - orgRiskReserve));
+			withdrawable = Math.min(withdrawable, orgWithdrawable);
+		}
+
 		return {
 			...balance,
 			grossAvailable: this.roundMoney(grossAvailable),
@@ -992,6 +1033,7 @@ export class OrganizerSalesService {
 			reserveExempt: Boolean(organization?.reserveExempt),
 			withdrawable,
 			available: withdrawable,
+			byEvent,
 		};
 	}
 
@@ -1000,13 +1042,15 @@ export class OrganizerSalesService {
 		return this.roundMoney(Math.max(0, balance) * percent);
 	}
 
-	private async getReservedWithdrawalAmount(organizationId: string) {
-		const requests = await this.withdrawalRequestsRepository.find({
-			where: {
-				organization: { id: organizationId },
-				status: In(['pending_review', 'approved', 'processing']),
-			},
-		});
+	private async getReservedWithdrawalAmount(organizationId: string, eventId?: string) {
+		const where: any = {
+			organization: { id: organizationId },
+			status: In(['pending_review', 'approved', 'processing']),
+		};
+		if (eventId) {
+			where.event = { id: eventId };
+		}
+		const requests = await this.withdrawalRequestsRepository.find({ where });
 		return this.roundMoney(requests.reduce((sum, request) => sum + Number(request.amount || 0), 0));
 	}
 
@@ -1077,16 +1121,22 @@ export class OrganizerSalesService {
 		return payload;
 	}
 
-	private async getOrders(organizationId: string) {
+	private async getOrders(organizationId: string, eventId?: string) {
 		// Sales rows use order snapshots, not ledger balances. Avoid eager-loading
 		// issued tickets and nested event/organization graphs for every order.
-		return this.ticketOrdersRepository.createQueryBuilder('order')
+		const qb = this.ticketOrdersRepository.createQueryBuilder('order')
 			.leftJoin('order.organization', 'organization')
 			.leftJoin('order.event', 'event').addSelect(['event.id', 'event.title', 'event.startsAt', 'event.endsAt'])
 			.leftJoin('order.referralCode', 'referralCode').addSelect(['referralCode.id', 'referralCode.code'])
 			.leftJoinAndSelect('order.items', 'items')
 			.leftJoin('items.ticketType', 'ticketType').addSelect('ticketType.id')
-			.where('organization.id = :organizationId', { organizationId })
+			.where('organization.id = :organizationId', { organizationId });
+
+		if (eventId?.trim()) {
+			qb.andWhere('event.id = :eventId', { eventId: eventId.trim() });
+		}
+
+		return qb
 			.orderBy('order.paidAt', 'DESC', 'NULLS LAST')
 			.addOrderBy('order.createdAt', 'DESC')
 			.getMany();
@@ -1100,7 +1150,7 @@ export class OrganizerSalesService {
 	}
 
 	private hasPaginationQuery(query: PaginationQuery) {
-		return Boolean(query.page ?? query.pageSize ?? query.search ?? query.status);
+		return Boolean(query.page ?? query.pageSize ?? query.search ?? query.status ?? query.eventId);
 	}
 
 	private normalizeOrderStatus(status?: string) {

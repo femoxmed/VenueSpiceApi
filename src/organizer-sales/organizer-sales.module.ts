@@ -8,6 +8,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { OrganizationEntity } from '../organizations/entities/organization.entity';
+import { EventEntity } from '../events/entities/event.entity';
 import { TicketOrderEntity } from '../ticket-orders/entities/ticket-order.entity';
 import { TicketTypeEntity } from '../events/entities/ticket-type.entity';
 import { OrganizerSalesController } from './organizer-sales.controller';
@@ -25,6 +26,7 @@ import { WithdrawalRequestEntity } from './entities/withdrawal-request.entity';
 			UserEntity,
 			OrganizationEntity,
 			OrganizationMemberEntity,
+			EventEntity,
 			TicketOrderEntity,
 			TicketTypeEntity,
 			WithdrawalRequestEntity,

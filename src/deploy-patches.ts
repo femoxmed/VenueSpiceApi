@@ -37,37 +37,42 @@ async function runDeployPatches() {
 		console.log('[deploy-patch] Running idempotent ledger sync and balance reconciliation for OS Entertainer & Olushegzy...');
 		await queryRunner.startTransaction();
 
-		// 1. Ensure Liberty Cromwell refund ledger entry exists
+		// 1. Ensure Liberty Cromwell refund ledger entry exists (if organization exists on this database)
 		await queryRunner.query(`
-			INSERT INTO financial_ledger_entries (
-				id,
-				idempotency_key,
-				"organizationId",
-				"orderId",
-				type,
-				status,
-				amount,
-				currency,
-				available_at,
-				metadata,
-				created_at,
-				updated_at
-			)
-			VALUES (
-				gen_random_uuid(),
-				'manual-refund-ledger:2a92a3cc-f4a4-49fd-a2ce-ed8bfad713c5',
-				'60887668-bc26-4043-942a-0812d3f84a86',
-				'6ead14df-dd08-44d4-9167-d5bfa38cdbca',
-				'refund',
-				'reversed',
-				-55.51,
-				'USD',
-				NOW(),
-				'{"refundRequestId":"2a92a3cc-f4a4-49fd-a2ce-ed8bfad713c5","customerEmail":"libertycromwell06@gmail.com","refundAmount":60.00,"deductedOrganizerNet":55.51,"reconciliationMethod":"stripe","stripeReference":"pm_1USGkDLMkRXz4kJQsutrDb2s","reason":"Deduct organizer share for manually reconciled external/stripe refund","isManualReconciliationLedgerSync":true}'::jsonb,
-				NOW(),
-				NOW()
-			)
-			ON CONFLICT (idempotency_key) DO NOTHING;
+			DO $$
+			BEGIN
+				IF EXISTS (SELECT 1 FROM organizations WHERE id = '60887668-bc26-4043-942a-0812d3f84a86') THEN
+					INSERT INTO financial_ledger_entries (
+						id,
+						idempotency_key,
+						"organizationId",
+						"orderId",
+						type,
+						status,
+						amount,
+						currency,
+						available_at,
+						metadata,
+						created_at,
+						updated_at
+					)
+					VALUES (
+						gen_random_uuid(),
+						'manual-refund-ledger:2a92a3cc-f4a4-49fd-a2ce-ed8bfad713c5',
+						'60887668-bc26-4043-942a-0812d3f84a86',
+						'6ead14df-dd08-44d4-9167-d5bfa38cdbca',
+						'refund',
+						'reversed',
+						-55.51,
+						'USD',
+						NOW(),
+						'{"refundRequestId":"2a92a3cc-f4a4-49fd-a2ce-ed8bfad713c5","customerEmail":"libertycromwell06@gmail.com","refundAmount":60.00,"deductedOrganizerNet":55.51,"reconciliationMethod":"stripe","stripeReference":"pm_1USGkDLMkRXz4kJQsutrDb2s","reason":"Deduct organizer share for manually reconciled external/stripe refund","isManualReconciliationLedgerSync":true}'::jsonb,
+						NOW(),
+						NOW()
+					)
+					ON CONFLICT (idempotency_key) DO NOTHING;
+				END IF;
+			END $$;
 		`);
 
 		// 2. Adjust Liberty Cromwell pending organizer_net entry to remaining subtotal ($10.49)
@@ -91,6 +96,15 @@ async function runDeployPatches() {
 			WHERE id = '539307bb-7e52-4faa-9304-72defb56f3b9'
 			  AND status = 'valid';
 		`);
+
+		// 4. Per-event withdrawal attribution and index optimization
+		await queryRunner.query(`
+			ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS "eventId" uuid REFERENCES events(id) ON DELETE RESTRICT;
+			CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_event_id ON withdrawal_requests("eventId");
+			CREATE INDEX IF NOT EXISTS idx_ticket_orders_org_event_status ON ticket_orders ("organizationId", "eventId", status);
+			CREATE INDEX IF NOT EXISTS idx_ledger_org_event_status ON financial_ledger_entries ("organizationId", "eventId", status);
+		`);
+		console.log('[deploy-patch] Ensured withdrawal_requests.eventId and composite indices exist.');
 
 		await queryRunner.commitTransaction();
 		console.log('[deploy-patch] Successfully completed deploy patches.');

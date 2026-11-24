@@ -8,6 +8,7 @@ import {
 	UpdateDateColumn,
 } from 'typeorm';
 import { OrganizationEntity } from '../../organizations/entities/organization.entity';
+import { EventEntity } from '../../events/entities/event.entity';
 
 export type WithdrawalRequestStatus =
 	| 'pending_review'
@@ -26,6 +27,9 @@ export class WithdrawalRequestEntity {
 
 	@ManyToOne(() => OrganizationEntity, { eager: true, onDelete: 'RESTRICT' })
 	organization: OrganizationEntity;
+
+	@ManyToOne(() => EventEntity, { eager: true, nullable: true, onDelete: 'RESTRICT' })
+	event?: EventEntity | null;
 
 	@Index()
 	@Column({ type: 'varchar', default: 'pending_review' })

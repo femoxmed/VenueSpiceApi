@@ -15,26 +15,39 @@ export class OrganizerSalesController {
 	constructor(private readonly organizerSalesService: OrganizerSalesService) {}
 
 	@Get('metrics')
-	metrics(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
-		return this.organizerSalesService.metrics(organizationId, req.user);
+	metrics(
+		@Query('organizationId') organizationId: string,
+		@Query('eventId') eventId: string | undefined,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.organizerSalesService.metrics(organizationId, req.user, eventId);
 	}
 
 	@Get('item-breakdown')
-	itemBreakdown(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
-		return this.organizerSalesService.itemBreakdown(organizationId, req.user);
+	itemBreakdown(
+		@Query('organizationId') organizationId: string,
+		@Query('eventId') eventId: string | undefined,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.organizerSalesService.itemBreakdown(organizationId, req.user, eventId);
 	}
 
 	@Get('influencer-breakdown')
-	influencerBreakdown(@Query('organizationId') organizationId: string, @Req() req: { user: { id: string; role: Role } }) {
-		return this.organizerSalesService.influencerBreakdown(organizationId, req.user);
+	influencerBreakdown(
+		@Query('organizationId') organizationId: string,
+		@Query('eventId') eventId: string | undefined,
+		@Req() req: { user: { id: string; role: Role } },
+	) {
+		return this.organizerSalesService.influencerBreakdown(organizationId, req.user, eventId);
 	}
 
 	@Get('summary')
 	summary(
 		@Query('organizationId') organizationId: string,
+		@Query('eventId') eventId: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.summary(organizationId, req.user);
+		return this.organizerSalesService.summary(organizationId, req.user, eventId);
 	}
 
 	@Get('orders')
@@ -44,9 +57,10 @@ export class OrganizerSalesController {
 		@Query('pageSize') pageSize: string | undefined,
 		@Query('search') search: string | undefined,
 		@Query('status') status: string | undefined,
+		@Query('eventId') eventId: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.orders(organizationId, req.user, { page, pageSize, search, status });
+		return this.organizerSalesService.orders(organizationId, req.user, { page, pageSize, search, status, eventId });
 	}
 
 	@Get('orders/:id')
@@ -90,9 +104,10 @@ export class OrganizerSalesController {
 	@Get('balance')
 	balance(
 		@Query('organizationId') organizationId: string,
+		@Query('eventId') eventId: string | undefined,
 		@Req() req: { user: { id: string; role: Role } },
 	) {
-		return this.organizerSalesService.balance(organizationId, req.user);
+		return this.organizerSalesService.balance(organizationId, req.user, eventId);
 	}
 
 	@Get('withdrawal-requests')
@@ -100,29 +115,37 @@ export class OrganizerSalesController {
 		@Query('organizationId') organizationId: string,
 		@Query('page') page: string | undefined,
 		@Query('pageSize') pageSize: string | undefined,
+		@Query('eventId') eventId: string | undefined,
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.organizerSalesService.listWithdrawalRequests(organizationId, req.user, { page, pageSize });
+		return this.organizerSalesService.listWithdrawalRequests(organizationId, req.user, { page, pageSize, eventId });
 	}
 
 	@Get('withdrawal-requests/early-preview')
 	earlyWithdrawalPreview(
 		@Query('organizationId') organizationId: string,
 		@Query('amount') amount: string | undefined,
+		@Query('eventId') eventId: string | undefined,
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
-		return this.organizerSalesService.earlyWithdrawalPreview(organizationId, req.user, amount ? Number(amount) : undefined);
+		return this.organizerSalesService.earlyWithdrawalPreview(organizationId, req.user, amount ? Number(amount) : undefined, eventId);
 	}
 
 	@Get('withdrawal-requests/preview')
-	withdrawalPreview(@Query('organizationId') organizationId: string, @Query('amount') amount: string, @Query('withdrawalType') withdrawalType: 'normal' | 'early' | 'instant' | undefined, @Req() req: { user: { id: string; email?: string; role: Role } }) {
-		return this.organizerSalesService.withdrawalPreview(organizationId, req.user, Number(amount), withdrawalType === 'instant' ? 'instant' : withdrawalType === 'early' ? 'early' : 'normal');
+	withdrawalPreview(
+		@Query('organizationId') organizationId: string,
+		@Query('amount') amount: string,
+		@Query('withdrawalType') withdrawalType: 'normal' | 'early' | 'instant' | undefined,
+		@Query('eventId') eventId: string | undefined,
+		@Req() req: { user: { id: string; email?: string; role: Role } },
+	) {
+		return this.organizerSalesService.withdrawalPreview(organizationId, req.user, Number(amount), withdrawalType === 'instant' ? 'instant' : withdrawalType === 'early' ? 'early' : 'normal', eventId);
 	}
 
 	@Post('withdrawal-requests')
 	requestWithdrawal(
 		@Query('organizationId') organizationId: string,
-		@Body() body: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string },
+		@Body() body: { amount?: number; note?: string; withdrawalType?: 'normal' | 'early' | 'instant'; acceptedEarlyWithdrawalFee?: boolean; previewToken?: string; eventId?: string },
 		@Req() req: { user: { id: string; email?: string; role: Role } },
 	) {
 		return this.organizerSalesService.requestWithdrawal(organizationId, req.user, body);

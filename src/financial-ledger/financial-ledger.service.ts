@@ -196,18 +196,23 @@ export class FinancialLedgerService {
 		});
 	}
 
-	async getBalance(organizationId: string, options: { synchronize?: boolean } = {}) {
+	async getBalance(organizationId: string, options: { synchronize?: boolean; eventId?: string } = {}) {
 		if (options.synchronize !== false) await this.syncOrganizationOrders(organizationId);
 		await this.releaseAvailableEntries(organizationId);
-		const totals = await this.ledgerRepository.createQueryBuilder('entry')
+		const qb = this.ledgerRepository.createQueryBuilder('entry')
 			.select("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'pending' THEN entry.amount ELSE 0 END), 0)", 'pending')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' AND (entry.metadata->>'paidOutAutomaticallyByStripe') = 'true' THEN entry.amount ELSE 0 END), 0)", 'legacyPaidOut')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'payout' AND entry.status = 'paid_out' THEN ABS(entry.amount) ELSE 0 END), 0)", 'recordedPayouts')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'refund' THEN ABS(entry.amount) WHEN entry.status = 'reversed' AND entry.type = 'organizer_net' AND NOT EXISTS (SELECT 1 FROM financial_ledger_entries r WHERE r.\"orderId\" = entry.\"orderId\" AND r.type = 'refund') THEN ABS(entry.amount) ELSE 0 END), 0)", 'reversed')
 			.addSelect('MIN(entry.currency)', 'currency')
-			.where('entry.organizationId = :organizationId', { organizationId })
-			.getRawOne<{ pending: string; available: string; legacyPaidOut: string; recordedPayouts: string; reversed: string }>();
+			.where('entry.organizationId = :organizationId', { organizationId });
+
+		if (options.eventId) {
+			qb.andWhere('entry.eventId = :eventId', { eventId: options.eventId });
+		}
+
+		const totals = await qb.getRawOne<{ pending: string; available: string; legacyPaidOut: string; recordedPayouts: string; reversed: string }>();
 		const pending = Number(totals?.pending || 0);
 		const available = Number(totals?.available || 0);
 		const paidOut = Number(totals?.legacyPaidOut || 0) + Number(totals?.recordedPayouts || 0);
@@ -222,9 +227,53 @@ export class FinancialLedgerService {
 		};
 	}
 
+	async getEventBalances(organizationId: string) {
+		await this.releaseAvailableEntries(organizationId);
+		const rows = await this.ledgerRepository.createQueryBuilder('entry')
+			.innerJoin('entry.event', 'event')
+			.select('event.id', 'eventId')
+			.addSelect('event.title', 'eventTitle')
+			.addSelect('event.status', 'eventStatus')
+			.addSelect('event.startsAt', 'eventStartsAt')
+			.addSelect('event.endsAt', 'eventEndsAt')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'pending' THEN entry.amount ELSE 0 END), 0)", 'pending')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' THEN entry.amount ELSE 0 END), 0)", 'paidOut')
+			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'refunds')
+			.where('entry.organizationId = :organizationId', { organizationId })
+			.groupBy('event.id')
+			.addGroupBy('event.title')
+			.addGroupBy('event.status')
+			.addGroupBy('event.startsAt')
+			.addGroupBy('event.endsAt')
+			.getRawMany();
+
+		return rows.map((row) => {
+			const pending = this.roundMoney(Number(row.pending || 0));
+			const available = this.roundMoney(Number(row.available || 0));
+			const paidOut = this.roundMoney(Number(row.paidOut || 0));
+			const refunds = this.roundMoney(Number(row.refunds || 0));
+			const endsAtDate = row.eventEndsAt ? new Date(row.eventEndsAt) : null;
+			const isEnded = Boolean(endsAtDate && !isNaN(endsAtDate.getTime()) && endsAtDate < new Date());
+			return {
+				eventId: row.eventId,
+				eventTitle: row.eventTitle || 'Untitled Event',
+				eventStatus: row.eventStatus || 'open',
+				fundsStatus: isEnded ? ('settled' as const) : ('escrow' as const),
+				startsAt: row.eventStartsAt,
+				endsAt: row.eventEndsAt,
+				pending,
+				available,
+				paidOut,
+				refunds,
+				grossEarnings: this.roundMoney(pending + available + paidOut),
+			};
+		});
+	}
+
 	async getWithdrawableEntries(
 		organizationId: string,
-		options?: { allowPending?: boolean },
+		options?: { allowPending?: boolean; eventId?: string },
 	) {
 		await this.syncOrganizationOrders(organizationId);
 		const allowedStatuses: FinancialLedgerEntryStatus[] = options?.allowPending
@@ -235,6 +284,7 @@ export class FinancialLedgerService {
 				organization: { id: organizationId },
 				type: 'organizer_net',
 				status: In(allowedStatuses),
+				...(options?.eventId ? { event: { id: options.eventId } } : {}),
 			},
 			order: { availableAt: 'ASC', createdAt: 'ASC' },
 		});
@@ -244,7 +294,7 @@ export class FinancialLedgerService {
 		organizationId: string,
 		requestedAmount: number,
 		preferredEntryIds?: string[],
-		options?: { allowPending?: boolean },
+		options?: { allowPending?: boolean; eventId?: string },
 	) {
 		const amount = this.roundMoney(requestedAmount);
 		if (amount <= 0) return [];
@@ -328,6 +378,7 @@ export class FinancialLedgerService {
 			this.ledgerRepository.create({
 				idempotencyKey: `organizer-payout:${organizationId}:${String(metadata.stripeTransferId || metadata.mockTransferId || Date.now())}`,
 				organization: entries[0].organization,
+				event: entries.every(e => e.event?.id && e.event?.id === entries[0].event?.id) ? entries[0].event : undefined,
 				type: 'payout',
 				status: 'paid_out',
 				amount: -this.roundMoney(amount),
