@@ -154,18 +154,99 @@ export class TicketOrdersService {
 		private readonly auditService: AuditService,
 	) {}
 
-	findAll(query: { status?: string } = {}) {
+	async findAll(query: { status?: string } = {}) {
 		const status = this.normalizeOrderStatus(query.status);
-		return this.ticketOrdersRepository.find({
-			where: status ? { status } : undefined,
-			order: { createdAt: 'DESC' },
-		});
+		const qb = this.ticketOrdersRepository
+			.createQueryBuilder('order')
+			.leftJoin('order.organization', 'organization')
+			.addSelect(['organization.id', 'organization.name', 'organization.slug'])
+			.leftJoin('order.event', 'event')
+			.addSelect(['event.id', 'event.title', 'event.startsAt', 'event.endsAt'])
+			.leftJoin('order.referralCode', 'referralCode')
+			.addSelect(['referralCode.id', 'referralCode.code', 'referralCode.usesCount'])
+			.leftJoinAndSelect('order.items', 'items')
+			.leftJoinAndSelect('order.tickets', 'tickets')
+			.orderBy('order.createdAt', 'DESC');
+
+		if (status) {
+			qb.where('order.status = :status', { status });
+		}
+
+		const orders = await qb.take(500).getMany();
+		return orders.map((order) => this.toTicketOrderRow(order));
 	}
 
 	async findOne(id: string) {
-		const order = await this.ticketOrdersRepository.findOne({ where: { id } });
+		const qb = this.ticketOrdersRepository
+			.createQueryBuilder('order')
+			.leftJoin('order.organization', 'organization')
+			.addSelect(['organization.id', 'organization.name', 'organization.slug'])
+			.leftJoin('order.event', 'event')
+			.addSelect(['event.id', 'event.title', 'event.startsAt', 'event.endsAt'])
+			.leftJoin('order.referralCode', 'referralCode')
+			.addSelect(['referralCode.id', 'referralCode.code', 'referralCode.usesCount'])
+			.leftJoinAndSelect('order.items', 'items')
+			.leftJoinAndSelect('order.tickets', 'tickets')
+			.where('order.id = :id', { id });
+
+		const order = await qb.getOne();
 		if (!order) throw new NotFoundException('Ticket order not found');
-		return order;
+		return this.toTicketOrderRow(order);
+	}
+
+	private toTicketOrderRow(order: TicketOrderEntity) {
+		return {
+			id: order.id,
+			customerName: order.customerName,
+			customerEmail: order.customerEmail,
+			customerPhone: order.customerPhone,
+			status: order.status,
+			subtotal: Number(order.subtotal ?? 0),
+			tax: Number(order.tax ?? 0),
+			total: Number(order.total ?? 0),
+			currency: order.currency || 'USD',
+			checkoutUrl: order.checkoutUrl,
+			stripeCheckoutSessionId: order.stripeCheckoutSessionId,
+			stripePaymentIntentId: order.stripePaymentIntentId,
+			paidAt: order.paidAt,
+			createdAt: order.createdAt,
+			organization: order.organization
+				? {
+						id: order.organization.id,
+						name: order.organization.name,
+						slug: order.organization.slug,
+					}
+				: undefined,
+			event: order.event
+				? {
+						id: order.event.id,
+						title: order.event.title,
+						startsAt: order.event.startsAt,
+						endsAt: order.event.endsAt,
+					}
+				: undefined,
+			referralCode: order.referralCode
+				? {
+						id: order.referralCode.id,
+						code: order.referralCode.code,
+						usesCount: order.referralCode.usesCount,
+					}
+				: null,
+			items: (order.items || []).map((item) => ({
+				id: item.id,
+				ticketName: item.ticketName,
+				quantity: item.quantity,
+				qty: item.quantity,
+				unitPrice: Number(item.unitPrice ?? 0),
+				lineTotal: Number(item.lineTotal ?? 0),
+			})),
+			tickets: (order.tickets || []).map((ticket) => ({
+				id: ticket.id,
+				code: ticket.code,
+				holderName: ticket.holderName,
+				status: ticket.status,
+			})),
+		};
 	}
 
 
