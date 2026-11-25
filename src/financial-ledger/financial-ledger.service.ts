@@ -30,6 +30,8 @@ export class FinancialLedgerService {
 		private readonly withdrawalRequestsRepository: Repository<WithdrawalRequestEntity>,
 		@InjectRepository(RefundRequestEntity)
 		private readonly refundsRepository: Repository<RefundRequestEntity>,
+		@InjectRepository(EventEntity)
+		private readonly eventsRepository: Repository<EventEntity>,
 		private readonly platformSettingsService: PlatformSettingsService,
 		private readonly auditService: AuditService,
 	) {}
@@ -229,8 +231,13 @@ export class FinancialLedgerService {
 
 	async getEventBalances(organizationId: string) {
 		await this.releaseAvailableEntries(organizationId);
-		const rows = await this.ledgerRepository.createQueryBuilder('entry')
-			.innerJoin('entry.event', 'event')
+		const rows = await this.eventsRepository.createQueryBuilder('event')
+			.leftJoin(
+				FinancialLedgerEntryEntity,
+				'entry',
+				'entry."eventId" = event.id AND entry."organizationId" = :organizationId',
+				{ organizationId },
+			)
 			.select('event.id', 'eventId')
 			.addSelect('event.title', 'eventTitle')
 			.addSelect('event.status', 'eventStatus')
@@ -240,7 +247,8 @@ export class FinancialLedgerService {
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'available' THEN entry.amount ELSE 0 END), 0)", 'available')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'organizer_net' AND entry.status = 'paid_out' THEN entry.amount ELSE 0 END), 0)", 'paidOut')
 			.addSelect("COALESCE(SUM(CASE WHEN entry.type = 'refund' THEN ABS(entry.amount) ELSE 0 END), 0)", 'refunds')
-			.where('entry.organizationId = :organizationId', { organizationId })
+			.where('event."organizationId" = :organizationId', { organizationId })
+			.andWhere('(event.status != :draftStatus OR entry.id IS NOT NULL)', { draftStatus: 'draft' })
 			.groupBy('event.id')
 			.addGroupBy('event.title')
 			.addGroupBy('event.status')
@@ -248,13 +256,20 @@ export class FinancialLedgerService {
 			.addGroupBy('event.endsAt')
 			.getRawMany();
 
-		return rows.map((row) => {
+		const eventBalances = rows.map((row) => {
 			const pending = this.roundMoney(Number(row.pending || 0));
 			const available = this.roundMoney(Number(row.available || 0));
 			const paidOut = this.roundMoney(Number(row.paidOut || 0));
 			const refunds = this.roundMoney(Number(row.refunds || 0));
 			const endsAtDate = row.eventEndsAt ? new Date(row.eventEndsAt) : null;
-			const isEnded = Boolean(endsAtDate && !isNaN(endsAtDate.getTime()) && endsAtDate < new Date());
+			const startsAtDate = row.eventStartsAt ? new Date(row.eventStartsAt) : null;
+			const conclusionDate = endsAtDate && !isNaN(endsAtDate.getTime())
+				? endsAtDate
+				: startsAtDate && !isNaN(startsAtDate.getTime())
+					? startsAtDate
+					: null;
+			const isEnded = Boolean(conclusionDate && conclusionDate.getTime() < Date.now());
+
 			return {
 				eventId: row.eventId,
 				eventTitle: row.eventTitle || 'Untitled Event',
@@ -268,6 +283,17 @@ export class FinancialLedgerService {
 				refunds,
 				grossEarnings: this.roundMoney(pending + available + paidOut),
 			};
+		});
+
+		// Sort actionable events first (available funds ready), then escrow (pending funds), then by date descending
+		return eventBalances.sort((a, b) => {
+			if (a.available > 0 && b.available <= 0) return -1;
+			if (b.available > 0 && a.available <= 0) return 1;
+			if (a.pending > 0 && b.pending <= 0) return -1;
+			if (b.pending > 0 && a.pending <= 0) return 1;
+			const timeA = a.startsAt ? new Date(a.startsAt).getTime() : 0;
+			const timeB = b.startsAt ? new Date(b.startsAt).getTime() : 0;
+			return timeB - timeA;
 		});
 	}
 

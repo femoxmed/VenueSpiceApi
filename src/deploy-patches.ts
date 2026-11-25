@@ -106,6 +106,21 @@ async function runDeployPatches() {
 		`);
 		console.log('[deploy-patch] Ensured withdrawal_requests.eventId and composite indices exist.');
 
+		// 5. Backfill missing eventId on financial_ledger_entries from ticket_orders
+		console.log('[deploy-patch] Backfilling missing eventId on financial_ledger_entries...');
+		await queryRunner.query(`
+			CREATE INDEX IF NOT EXISTS idx_ledger_order_id ON financial_ledger_entries("orderId");
+
+			UPDATE financial_ledger_entries l
+			SET "eventId" = o."eventId",
+			    updated_at = NOW()
+			FROM ticket_orders o
+			WHERE l."orderId" = o.id
+			  AND l."eventId" IS NULL
+			  AND o."eventId" IS NOT NULL;
+		`);
+		console.log('[deploy-patch] Ensured idx_ledger_order_id exists and backfilled missing eventId on financial_ledger_entries.');
+
 		await queryRunner.commitTransaction();
 		console.log('[deploy-patch] Successfully completed deploy patches.');
 	} catch (error) {
