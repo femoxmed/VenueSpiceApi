@@ -135,31 +135,31 @@ async function runDeployPatches() {
 				o.id,
 				'organizer_net',
 				CASE
-					WHEN (COALESCE(e."endsAt", e."startsAt") IS NOT NULL AND COALESCE(e."endsAt", e."startsAt") < NOW())
-					     OR (o."paidAt" IS NOT NULL AND o."paidAt" + INTERVAL '7 days' < NOW())
+					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND COALESCE(e.ends_at, e.starts_at) < NOW())
+					     OR (o.paid_at IS NOT NULL AND o.paid_at + INTERVAL '7 days' < NOW())
 					THEN 'available'
 					ELSE 'pending'
 				END,
-				COALESCE(o."organizerNet", 0),
+				COALESCE(o.organizer_net, 0),
 				COALESCE(o.currency, 'USD'),
 				CASE
-					WHEN (COALESCE(e."endsAt", e."startsAt") IS NOT NULL AND COALESCE(e."endsAt", e."startsAt") < NOW())
+					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND COALESCE(e.ends_at, e.starts_at) < NOW())
 					THEN NOW()
-					WHEN e."endsAt" IS NOT NULL THEN e."endsAt" + INTERVAL '7 days'
-					WHEN e."startsAt" IS NOT NULL THEN e."startsAt" + INTERVAL '7 days'
-					ELSE COALESCE(o."paidAt", o.created_at, NOW()) + INTERVAL '7 days'
+					WHEN e.ends_at IS NOT NULL THEN e.ends_at + INTERVAL '7 days'
+					WHEN e.starts_at IS NOT NULL THEN e.starts_at + INTERVAL '7 days'
+					ELSE COALESCE(o.paid_at, o.created_at, NOW()) + INTERVAL '7 days'
 				END,
 				jsonb_build_object(
 					'payoutMode', 'platform_hold',
 					'payoutEligible', true,
 					'backfilledFromOrders', true
 				),
-				COALESCE(o."paidAt", o.created_at, NOW()),
+				COALESCE(o.paid_at, o.created_at, NOW()),
 				NOW()
 			FROM ticket_orders o
 			LEFT JOIN events e ON e.id = o."eventId"
 			WHERE o.status = 'paid'
-			  AND o."organizerNet" > 0
+			  AND o.organizer_net > 0
 			  AND o."organizationId" IS NOT NULL
 			  AND NOT EXISTS (
 				  SELECT 1 FROM financial_ledger_entries l
@@ -185,7 +185,7 @@ async function runDeployPatches() {
 			WHERE l."eventId" = e.id
 			  AND l.type = 'organizer_net'
 			  AND l.status = 'pending'
-			  AND COALESCE(e."endsAt", e."startsAt") < NOW();
+			  AND COALESCE(e.ends_at, e.starts_at) < NOW();
 		`);
 		console.log('[deploy-patch] Ensured ledger entries backfilled and mature entries transitioned to available.');
 
