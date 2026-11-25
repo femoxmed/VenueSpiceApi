@@ -1,11 +1,13 @@
-import { isPhoneNumber } from 'class-validator';
-import { UnauthorizedException, ForbiddenException } from '@nestjs/common';
-import { AnalyticsDisputeEntity } from '../analytics/entities/analytics-dispute.entity';
 import {
 	BadRequestException,
+	ForbiddenException,
 	Injectable,
+	Logger,
 	NotFoundException,
+	UnauthorizedException,
 } from '@nestjs/common';
+import { isPhoneNumber } from 'class-validator';
+import { AnalyticsDisputeEntity } from '../analytics/entities/analytics-dispute.entity';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes, timingSafeEqual } from 'crypto';
@@ -25,6 +27,7 @@ import { OrganizationEntity } from '../organizations/entities/organization.entit
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity';
 import { PlatformSettingsService } from '../platform-settings/platform-settings.service';
+import { FinancialLedgerService } from '../financial-ledger/financial-ledger.service';
 import { CheckoutAddOnItemDto, CheckoutTicketItemDto, CreateCheckoutSessionDto } from './dto/create-checkout-session.dto';
 import { FindMyTicketDto } from './dto/find-my-ticket.dto';
 import { ReassignTicketOrderDto } from './dto/reassign-ticket-order.dto';
@@ -121,6 +124,8 @@ type PreparedCheckoutDiscount = {
 
 @Injectable()
 export class TicketOrdersService {
+	private readonly logger = new Logger(TicketOrdersService.name);
+
 	constructor(
 		@InjectRepository(TicketOrderEntity)
 		private readonly ticketOrdersRepository: Repository<TicketOrderEntity>,
@@ -152,6 +157,7 @@ export class TicketOrdersService {
 		private readonly notificationsService: NotificationsService,
 		private readonly platformSettingsService: PlatformSettingsService,
 		private readonly auditService: AuditService,
+		private readonly financialLedgerService: FinancialLedgerService,
 	) {}
 
 	async findAll(query: { status?: string } = {}) {
@@ -1734,6 +1740,9 @@ export class TicketOrdersService {
 
 		order.tickets = await this.issueTickets(order);
 		const savedOrder = await this.ticketOrdersRepository.save(order);
+		await this.financialLedgerService.syncOrder(savedOrder).catch((err) => {
+			this.logger.error(`Failed to sync order ${savedOrder.id} to financial ledger: ${err?.message || err}`);
+		});
 		await this.queueTicketDeliveryEmails(savedOrder).catch(() => undefined);
 		await this.queueOrderPaidNotifications(savedOrder).catch(() => undefined);
 		return savedOrder;

@@ -106,11 +106,69 @@ async function runDeployPatches() {
 		`);
 		console.log('[deploy-patch] Ensured withdrawal_requests.eventId and composite indices exist.');
 
-		// 5. Backfill missing eventId on financial_ledger_entries from ticket_orders
-		console.log('[deploy-patch] Backfilling missing eventId on financial_ledger_entries...');
+		// 5. Backfill missing ledger entries and eventId on financial_ledger_entries from ticket_orders
+		console.log('[deploy-patch] Backfilling missing ledger entries and eventId on financial_ledger_entries...');
 		await queryRunner.query(`
 			CREATE INDEX IF NOT EXISTS idx_ledger_order_id ON financial_ledger_entries("orderId");
 
+			-- Insert missing organizer_net ledger entries for paid orders
+			INSERT INTO financial_ledger_entries (
+				id,
+				idempotency_key,
+				"organizationId",
+				"eventId",
+				"orderId",
+				type,
+				status,
+				amount,
+				currency,
+				available_at,
+				metadata,
+				created_at,
+				updated_at
+			)
+			SELECT
+				gen_random_uuid(),
+				'ticket-order:' || o.id || ':organizer_net',
+				o."organizationId",
+				o."eventId",
+				o.id,
+				'organizer_net',
+				CASE
+					WHEN (COALESCE(e."endsAt", e."startsAt") IS NOT NULL AND COALESCE(e."endsAt", e."startsAt") < NOW())
+					     OR (o."paidAt" IS NOT NULL AND o."paidAt" + INTERVAL '7 days' < NOW())
+					THEN 'available'
+					ELSE 'pending'
+				END,
+				COALESCE(o."organizerNet", 0),
+				COALESCE(o.currency, 'USD'),
+				CASE
+					WHEN (COALESCE(e."endsAt", e."startsAt") IS NOT NULL AND COALESCE(e."endsAt", e."startsAt") < NOW())
+					THEN NOW()
+					WHEN e."endsAt" IS NOT NULL THEN e."endsAt" + INTERVAL '7 days'
+					WHEN e."startsAt" IS NOT NULL THEN e."startsAt" + INTERVAL '7 days'
+					ELSE COALESCE(o."paidAt", o.created_at, NOW()) + INTERVAL '7 days'
+				END,
+				jsonb_build_object(
+					'payoutMode', 'platform_hold',
+					'payoutEligible', true,
+					'backfilledFromOrders', true
+				),
+				COALESCE(o."paidAt", o.created_at, NOW()),
+				NOW()
+			FROM ticket_orders o
+			LEFT JOIN events e ON e.id = o."eventId"
+			WHERE o.status = 'paid'
+			  AND o."organizerNet" > 0
+			  AND o."organizationId" IS NOT NULL
+			  AND NOT EXISTS (
+				  SELECT 1 FROM financial_ledger_entries l
+				  WHERE l.idempotency_key = 'ticket-order:' || o.id || ':organizer_net'
+				     OR (l."orderId" = o.id AND l.type = 'organizer_net')
+			  )
+			ON CONFLICT (idempotency_key) DO NOTHING;
+
+			-- Also link any existing ledger entries that had eventId IS NULL
 			UPDATE financial_ledger_entries l
 			SET "eventId" = o."eventId",
 			    updated_at = NOW()
@@ -118,8 +176,18 @@ async function runDeployPatches() {
 			WHERE l."orderId" = o.id
 			  AND l."eventId" IS NULL
 			  AND o."eventId" IS NOT NULL;
+
+			-- Ensure past events have their pending funds transitioned to available
+			UPDATE financial_ledger_entries l
+			SET status = 'available',
+			    updated_at = NOW()
+			FROM events e
+			WHERE l."eventId" = e.id
+			  AND l.type = 'organizer_net'
+			  AND l.status = 'pending'
+			  AND COALESCE(e."endsAt", e."startsAt") < NOW();
 		`);
-		console.log('[deploy-patch] Ensured idx_ledger_order_id exists and backfilled missing eventId on financial_ledger_entries.');
+		console.log('[deploy-patch] Ensured ledger entries backfilled and mature entries transitioned to available.');
 
 		await queryRunner.commitTransaction();
 		console.log('[deploy-patch] Successfully completed deploy patches.');

@@ -13,6 +13,7 @@ import { PaymentIntentEntity } from '../payments/entities/payment-intent.entity'
 import { NotificationsModule } from '../notifications/notifications.module';
 import { OrganizationMemberEntity } from '../organizations/entities/organization-member.entity';
 import { PlatformSettingsModule } from '../platform-settings/platform-settings.module';
+import { FinancialLedgerModule } from '../financial-ledger/financial-ledger.module';
 import { IssuedTicketEntity } from './entities/issued-ticket.entity';
 import { TicketOrderItemEntity } from './entities/ticket-order-item.entity';
 import { TicketOrderEntity } from './entities/ticket-order.entity';
@@ -24,6 +25,7 @@ import { TicketOrdersService } from './ticket-orders.service';
 		AuditModule,
 		NotificationsModule,
 		PlatformSettingsModule,
+		FinancialLedgerModule,
 		TypeOrmModule.forFeature([
 			TicketOrderEntity,
 			TicketOrderItemEntity,
