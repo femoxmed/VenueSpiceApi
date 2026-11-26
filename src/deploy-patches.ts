@@ -135,19 +135,19 @@ async function runDeployPatches() {
 				o.id,
 				'organizer_net',
 				CASE
-					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND COALESCE(e.ends_at, e.starts_at) < NOW())
-					     OR (o.paid_at IS NOT NULL AND o.paid_at + INTERVAL '7 days' < NOW())
+					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND (COALESCE(e.ends_at, e.starts_at) + INTERVAL '12 hours') <= NOW())
+					     OR (o.paid_at IS NOT NULL AND o.paid_at + INTERVAL '12 hours' <= NOW())
 					THEN 'available'
 					ELSE 'pending'
 				END,
 				COALESCE(o.organizer_net, 0),
 				COALESCE(o.currency, 'USD'),
 				CASE
-					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND COALESCE(e.ends_at, e.starts_at) < NOW())
+					WHEN (COALESCE(e.ends_at, e.starts_at) IS NOT NULL AND (COALESCE(e.ends_at, e.starts_at) + INTERVAL '12 hours') <= NOW())
 					THEN NOW()
-					WHEN e.ends_at IS NOT NULL THEN e.ends_at + INTERVAL '7 days'
-					WHEN e.starts_at IS NOT NULL THEN e.starts_at + INTERVAL '7 days'
-					ELSE COALESCE(o.paid_at, o.created_at, NOW()) + INTERVAL '7 days'
+					WHEN e.ends_at IS NOT NULL THEN e.ends_at + INTERVAL '12 hours'
+					WHEN e.starts_at IS NOT NULL THEN e.starts_at + INTERVAL '12 hours'
+					ELSE COALESCE(o.paid_at, o.created_at, NOW()) + INTERVAL '12 hours'
 				END,
 				jsonb_build_object(
 					'payoutMode', 'platform_hold',
@@ -177,7 +177,7 @@ async function runDeployPatches() {
 			  AND l."eventId" IS NULL
 			  AND o."eventId" IS NOT NULL;
 
-			-- Ensure past events have their pending funds transitioned to available
+			-- Ensure past events (ended > 12 hours ago) have their pending funds transitioned to available
 			UPDATE financial_ledger_entries l
 			SET status = 'available',
 			    updated_at = NOW()
@@ -185,7 +185,16 @@ async function runDeployPatches() {
 			WHERE l."eventId" = e.id
 			  AND l.type = 'organizer_net'
 			  AND l.status = 'pending'
-			  AND COALESCE(e.ends_at, e.starts_at) < NOW();
+			  AND (COALESCE(e.ends_at, e.starts_at) + INTERVAL '12 hours') <= NOW();
+
+			-- Align platform settings with 12 hour hold policy and free standard payouts
+			UPDATE platform_settings
+			SET value = '0.5'
+			WHERE key = 'ORGANIZER_PAYOUT_HOLD_DAYS' AND (value = '3' OR value = '7');
+
+			UPDATE platform_settings
+			SET value = '0'
+			WHERE key = 'STANDARD_WITHDRAWAL_FEE_PERCENT' AND value = '0.01';
 		`);
 		console.log('[deploy-patch] Ensured ledger entries backfilled and mature entries transitioned to available.');
 

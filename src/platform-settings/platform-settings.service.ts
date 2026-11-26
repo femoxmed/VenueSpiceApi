@@ -51,7 +51,7 @@ const defaults = {
 	venueSpiceFeeFixed: 1.29,
 	paymentProcessingFeePercent: 0.029,
 	paymentProcessingFeeFixed: 0.3,
-	organizerPayoutHoldDays: 3,
+	organizerPayoutHoldDays: 0.5,
 	defaultFeePayer: 'buyer',
 	stripeAutomaticTaxEnabled: true,
 	stripeTaxCode: '',
@@ -60,7 +60,7 @@ const defaults = {
 	allowOrganizerManualTax: true,
 	earlyWithdrawalEnabled: true,
 	earlyWithdrawalFeePercent: 0.01,
-	standardWithdrawalFeePercent: 0.01,
+	standardWithdrawalFeePercent: 0,
 	instantWithdrawalFeePercent: 0.03,
 	organizerReservePercent: 0.2,
 } satisfies PricingSettings;
@@ -70,7 +70,7 @@ const descriptions: Record<string, string> = {
 	VENUE_SPICE_FEE_FIXED: 'Venue Spice fixed service fee per paid ticket.',
 	PAYMENT_PROCESSING_FEE_PERCENT: 'Estimated Stripe/payment processing percentage fee per order. Use decimal format, e.g. 0.029 for 2.9%.',
 	PAYMENT_PROCESSING_FEE_FIXED: 'Estimated Stripe/payment processing fixed fee per order.',
-	ORGANIZER_PAYOUT_HOLD_DAYS: 'Number of days after an event ends before organizer earnings become withdrawable.',
+	ORGANIZER_PAYOUT_HOLD_DAYS: 'Number of days (e.g. 0.5 for 12 hours) after an event ends before organizer earnings become withdrawable.',
 	DEFAULT_FEE_PAYER: 'Default fee payer for new checkouts. buyer adds fees on top; organizer absorbs fees.',
 	STRIPE_AUTOMATIC_TAX_ENABLED: 'Enable Stripe Automatic Tax for ticket checkout sessions.',
 	STRIPE_TAX_CODE: 'Optional Stripe tax code applied to ticket products, e.g. txcd_*. Leave blank to use Stripe defaults.',
@@ -78,10 +78,10 @@ const descriptions: Record<string, string> = {
 	SUPPORTED_TAX_REGIONS: 'Comma-separated country/state regions where Venue Spice collects tax, e.g. US:TX.',
 	ALLOW_ORGANIZER_MANUAL_TAX: 'Allow organizers outside supported tax regions to enter a tax rate after accepting responsibility.',
 	EARLY_WITHDRAWAL_ENABLED: 'Allow organizers to request payout before the normal payout policy hold expires.',
-	EARLY_WITHDRAWAL_FEE_PERCENT: 'Default fee charged on early organizer withdrawals. Use decimal format, e.g. 0.07 for 7%.',
-	STANDARD_WITHDRAWAL_FEE_PERCENT: 'Venue Spice fee for standard organizer withdrawals. Use decimal format, e.g. 0.01 for 1%.',
+	EARLY_WITHDRAWAL_FEE_PERCENT: 'Default fee charged on early organizer withdrawals. Use decimal format, e.g. 0.01 for 1%.',
+	STANDARD_WITHDRAWAL_FEE_PERCENT: 'Venue Spice fee for standard organizer withdrawals. 0 for free standard payouts.',
 	INSTANT_WITHDRAWAL_FEE_PERCENT: 'Venue Spice fee for instant organizer withdrawals. Use decimal format, e.g. 0.03 for 3%.',
-	ORGANIZER_RESERVE_PERCENT: 'Percentage of organizer net earnings held for refunds, disputes, and cancellations. Use decimal format, e.g. 0.2 for 20%.',
+	ORGANIZER_RESERVE_PERCENT: 'Percentage of organizer net earnings held for refunds, disputes, and cancellations on active events. 0% after event maturity.',
 };
 
 @Injectable()

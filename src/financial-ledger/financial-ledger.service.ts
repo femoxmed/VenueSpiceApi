@@ -269,12 +269,15 @@ export class FinancialLedgerService {
 					? startsAtDate
 					: null;
 			const isEnded = Boolean(conclusionDate && conclusionDate.getTime() < Date.now());
+			const isPast12Hours = Boolean(conclusionDate && (conclusionDate.getTime() + 12 * 60 * 60 * 1000) <= Date.now());
 
 			return {
 				eventId: row.eventId,
 				eventTitle: row.eventTitle || 'Untitled Event',
 				eventStatus: row.eventStatus || 'open',
-				fundsStatus: isEnded ? ('settled' as const) : ('escrow' as const),
+				fundsStatus: isPast12Hours ? ('settled' as const) : ('escrow' as const),
+				isEnded,
+				isPast12Hours,
 				startsAt: row.eventStartsAt,
 				endsAt: row.eventEndsAt,
 				pending,
@@ -581,7 +584,7 @@ export class FinancialLedgerService {
 
 	private async getHoldDays() {
 		const raw = await this.platformSettingsService.getOrganizerPayoutHoldDays();
-		return Number.isFinite(raw) && raw >= 0 ? raw : 3;
+		return Number.isFinite(raw) && raw >= 0 ? raw : 0.5;
 	}
 
 	private feeSnapshotNumber(order: TicketOrderEntity, key: string, fallback: number) {
@@ -637,9 +640,7 @@ export class FinancialLedgerService {
 	}
 
 	private addHoldDays(date: Date, holdDays: number) {
-		const availableAt = new Date(date);
-		availableAt.setDate(availableAt.getDate() + holdDays);
-		return availableAt;
+		return new Date(date.getTime() + holdDays * 24 * 60 * 60 * 1000);
 	}
 
 	private getActiveOrganizationPayoutPolicy(order: TicketOrderEntity) {
