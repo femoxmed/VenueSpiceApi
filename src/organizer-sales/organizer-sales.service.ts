@@ -286,7 +286,17 @@ export class OrganizerSalesService {
 		const pricing = await this.platformSettingsService.getPricingSettings();
 		const balance = await this.ledgerService.getBalance(organizationId, { synchronize: false, eventId });
 		const reserved = await this.getReservedWithdrawalAmount(organizationId, eventId);
-		const effectiveReservePercent = organization.reserveExempt ? 0 : pricing.organizerReservePercent;
+
+		let isPast12Hours = false;
+		if (eventId) {
+			const event = await this.eventsRepository.findOne({ where: { id: eventId } });
+			const endsAt = event?.endsAt ? new Date(event.endsAt) : null;
+			const startsAt = event?.startsAt ? new Date(event.startsAt) : null;
+			const conclusion = endsAt && !isNaN(endsAt.getTime()) ? endsAt : (startsAt && !isNaN(startsAt.getTime()) ? startsAt : null);
+			isPast12Hours = Boolean(conclusion && (conclusion.getTime() + 12 * 60 * 60 * 1000) <= Date.now());
+		}
+
+		const effectiveReservePercent = (organization.reserveExempt || isPast12Hours) ? 0 : pricing.organizerReservePercent;
 		const reserve = this.calculateRiskReserve(Number(balance.available || 0) + Number(balance.pending || 0), effectiveReservePercent);
 		const grossAvailable = this.roundMoney(Math.max(0, Number(balance.available || 0) + Number(balance.pending || 0) - reserved - reserve));
 		const feePercent = organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null
@@ -303,7 +313,7 @@ export class OrganizerSalesService {
 			netAmount: this.roundMoney(Math.max(0, requested - feeAmount)),
 			feeSource: organization.earlyWithdrawalEnabled && organization.earlyWithdrawalFeePercent != null ? 'organization_override' : 'platform_default',
 			earlyWithdrawalEnabled: pricing.earlyWithdrawalEnabled,
-			reserveExempt: Boolean(organization.reserveExempt),
+			reserveExempt: Boolean(organization.reserveExempt || isPast12Hours),
 			eventId: eventId || null,
 		};
 	}
@@ -688,13 +698,28 @@ export class OrganizerSalesService {
 		}
 		if (request.metadata?.beneficiaryType !== 'influencer') {
 			const pricing = await this.platformSettingsService.getPricingSettings();
-			const balance = await this.ledgerService.getBalance(request.organization.id, { synchronize: false });
+			const eventId = typeof request.event?.id === 'string' ? request.event.id : (typeof request.metadata?.eventId === 'string' ? request.metadata.eventId : undefined);
+			const balance = await this.ledgerService.getBalance(request.organization.id, { synchronize: false, eventId });
 			const gross = request.withdrawalType === 'normal'
 				? Number(balance.available || 0)
 				: Number(balance.available || 0) + Number(balance.pending || 0);
 			const currentReservation = ['pending_review', 'approved', 'processing'].includes(request.status) ? Number(request.amount || 0) : 0;
-			const reserved = Math.max(0, (await this.getReservedWithdrawalAmount(request.organization.id)) - currentReservation);
-			const effectiveReservePercent = request.organization?.reserveExempt ? 0 : pricing.organizerReservePercent;
+			const reserved = Math.max(0, (await this.getReservedWithdrawalAmount(request.organization.id, eventId)) - currentReservation);
+
+			let isPast12Hours = false;
+			const event = request.event || (eventId ? await this.eventsRepository.findOne({ where: { id: eventId } }) : null);
+			if (event) {
+				const endsAt = event.endsAt ? new Date(event.endsAt) : null;
+				const startsAt = event.startsAt ? new Date(event.startsAt) : null;
+				const conclusion = endsAt && !isNaN(endsAt.getTime()) ? endsAt : (startsAt && !isNaN(startsAt.getTime()) ? startsAt : null);
+				isPast12Hours = Boolean(conclusion && (conclusion.getTime() + 12 * 60 * 60 * 1000) <= Date.now());
+			} else {
+				const byEvent = await this.ledgerService.getEventBalances(request.organization.id);
+				isPast12Hours = byEvent.length > 0 && byEvent.every(e => e.fundsStatus === 'settled' || (e as any).isPast12Hours || Number(e.pending || 0) <= 0);
+			}
+
+			// Concluded events past 12h, or standard matured payouts, or exempt orgs have 0% reserve hold
+			const effectiveReservePercent = (request.organization?.reserveExempt || isPast12Hours || request.withdrawalType === 'normal') ? 0 : pricing.organizerReservePercent;
 			const riskReserve = this.calculateRiskReserve(gross, effectiveReservePercent);
 			const eligible = this.roundMoney(Math.max(0, gross - reserved - riskReserve));
 			if (Number(request.amount || 0) > eligible) {
@@ -1037,7 +1062,10 @@ export class OrganizerSalesService {
 	}
 
 	private async findWithdrawalRequest(id: string) {
-		const request = await this.withdrawalRequestsRepository.findOne({ where: { id } });
+		const request = await this.withdrawalRequestsRepository.findOne({
+			where: { id },
+			relations: { organization: true, event: true },
+		});
 		if (!request) throw new NotFoundException('Withdrawal request not found');
 		return request;
 	}
