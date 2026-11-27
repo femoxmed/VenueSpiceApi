@@ -541,6 +541,10 @@ export class TicketOrdersService {
 		if (!event || event.status !== 'published') {
 			throw new BadRequestException('Published event not found');
 		}
+		const eventEndTime = event.endsAt ? new Date(event.endsAt).getTime() : new Date(event.startsAt).getTime();
+		if (Number.isFinite(eventEndTime) && eventEndTime < Date.now()) {
+			throw new BadRequestException('This event has already ended. Ticket sales are closed.');
+		}
 		if ((event.visibility || 'public') === 'private') {
 			const canAccess = await this.canAccessPrivateEvent(event, dto.privateAccessToken, dto.accessCode);
 			if (!canAccess) {

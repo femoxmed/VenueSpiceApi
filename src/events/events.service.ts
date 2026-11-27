@@ -66,9 +66,9 @@ export class EventsService {
 		}).then((events) => events.map((event) => this.toDashboardEvent(event)));
 	}
 
-	findPublic() {
+	async findPublic() {
 		const now = new Date();
-		return this.eventsRepository
+		const upcomingPromise = this.eventsRepository
 			.createQueryBuilder('event')
 			.leftJoinAndSelect('event.organization', 'organization')
 			.leftJoinAndSelect('event.ticketTypes', 'ticketTypes')
@@ -81,9 +81,43 @@ export class EventsService {
 				}),
 			)
 			.orderBy('event.startsAt', 'ASC')
-			.take(24)
-			.getMany()
-			.then((events) => events.map((event) => this.toPublicListingEvent(event)));
+			.take(40)
+			.getMany();
+
+		const endedPromise = this.eventsRepository
+			.createQueryBuilder('event')
+			.leftJoinAndSelect('event.organization', 'organization')
+			.leftJoinAndSelect('event.ticketTypes', 'ticketTypes')
+			.where('event.status = :status', { status: 'published' })
+			.andWhere(
+				new Brackets((builder) => {
+					builder
+						.where('event.endsAt IS NOT NULL AND event.endsAt < :now', { now })
+						.orWhere('event.endsAt IS NULL AND event.startsAt < :now', { now });
+				}),
+			)
+			.andWhere(
+				new Brackets((builder) => {
+					builder
+						.where(
+							'EXISTS (SELECT 1 FROM ticket_types tt WHERE tt."eventId" = event.id AND tt.quantity_sold > 0)',
+						)
+						.orWhere(
+							'EXISTS (SELECT 1 FROM ticket_orders o WHERE o."eventId" = event.id AND o.status = :paidStatus)',
+							{ paidStatus: 'paid' },
+						);
+				}),
+			)
+			.orderBy('COALESCE(event.endsAt, event.startsAt)', 'DESC')
+			.take(40)
+			.getMany();
+
+		const [upcomingEvents, endedEvents] = await Promise.all([upcomingPromise, endedPromise]);
+
+		return [
+			...upcomingEvents.map((event) => this.toPublicListingEvent(event)),
+			...endedEvents.map((event) => this.toPublicListingEvent(event)),
+		];
 	}
 
 	async findPublicOne(idOrSlug: string, accessToken?: string) {
@@ -1252,6 +1286,8 @@ export class EventsService {
 
 	private toPublicEvent(event: EventEntity) {
 		const organization = event.organization;
+		const endTime = event.endsAt ? new Date(event.endsAt).getTime() : new Date(event.startsAt).getTime();
+		const isEnded = Number.isFinite(endTime) && endTime < Date.now();
 		const {
 			privateAccessToken: _privateAccessToken,
 			privateAccessTokenHash: _privateAccessTokenHash,
@@ -1261,6 +1297,7 @@ export class EventsService {
 		} = event;
 		return {
 			...publicEvent,
+			isEnded,
 			organization: organization ? {
 				id: organization.id,
 				name: organization.name,
